@@ -22,6 +22,7 @@ from sharc.propagation.propagation_clear_air_452 import PropagationClearAir
 from sharc.propagation.propagation_tvro import PropagationTvro
 from sharc.propagation.propagation_indoor import PropagationIndoor
 from sharc.propagation.propagation_hdfss import PropagationHDFSS
+from sharc.propagation.propagation_p528 import PropagationP528
 
 
 class PropagationFactory(object):
@@ -34,29 +35,7 @@ class PropagationFactory(object):
         param_system: ParametersBase,
         random_number_gen: rnd.RandomState,
     ) -> Propagation:
-        """Create and return a propagation model object.
-
-        Parameters
-        ----------
-        channel_model : str
-            The channel model.
-        param : Parameters
-            The simulation parameters.
-        param_system : ParametersBase
-            Specific system parameters. It can be either ParametersIMT or other system parameters.
-        random_number_gen : rnd.RandomState
-            Random number generator.
-
-        Returns
-        -------
-        Propagation
-            Propagation object.
-
-        Raises
-        ------
-        ValueError
-            If the channel model is not implemented.
-        """
+        """Create and return a propagation model object."""
         if channel_model == "FSPL":
             return PropagationFreeSpace(random_number_gen)
         elif channel_model == "ABG":
@@ -67,19 +46,21 @@ class PropagationFactory(object):
             return PropagationUMi(
                 random_number_gen,
                 param.imt.los_adjustment_factor)
+
         elif channel_model == "SatelliteSimple":
             return PropagationSatSimple(random_number_gen)
         elif channel_model == "TerrestrialSimple":
             return PropagationTerSimple(random_number_gen)
+
         elif channel_model == "P619":
             if isinstance(param_system, ParametersImt):
                 if param_system.topology.type != "NTN":
                     raise ValueError(
-                        f"PropagationFactory: Channel model P.619 is invalid for topolgy {
-                            param.imt.topology.type}", )
+                        f"PropagationFactory: Channel model P.619 is invalid for topolgy {param.imt.topology.type}"
+                    )
             else:
                 # P.619 model is used only for space-to-earth links
-                if param.imt.topology.type != "NTN" and not param_system.is_space_to_earth:
+                if param.imt.topology.type not in ["NTN", "MSS_DC"] and not param_system.is_space_to_earth:
                     raise ValueError((
                         "PropagationFactory: Channel model P.619 is invalid"
                         f"for system {param.general.system} and IMT "
@@ -87,15 +68,23 @@ class PropagationFactory(object):
                     ))
             return PropagationP619(
                 random_number_gen=random_number_gen,
-                space_station_alt_m=param_system.param_p619.space_station_alt_m,
                 earth_station_alt_m=param_system.param_p619.earth_station_alt_m,
                 earth_station_lat_deg=param_system.param_p619.earth_station_lat_deg,
-                earth_station_long_diff_deg=param_system.param_p619.earth_station_lat_deg,
-                season=param_system.season,
+                season=param_system.param_p619.season,
+                mean_clutter_height=param_system.param_p619.mean_clutter_height,
+                below_rooftop=param_system.param_p619.below_rooftop
             )
+
         elif channel_model == "P452":
             return PropagationClearAir(
                 random_number_gen, param_system.param_p452)
+
+        # ⬇️ novo caso P528 (aeronautical / air-ground)
+        elif channel_model == "P528":
+            # Sem restrições adicionais aqui; qualquer validação de aplicabilidade
+            # (ex.: não-satélite) pode ser feita onde o modelo é usado.
+            return PropagationP528(random_number_gen)
+
         elif channel_model == "TVRO-URBAN":
             return PropagationTvro(random_number_gen, "URBAN")
         elif channel_model == "TVRO-SUBURBAN":

@@ -201,6 +201,8 @@ class Results(object):
         snapshot_number : int
             Current snapshot number
         """
+        from sharc.support.backend_handler import backend
+        
         results_relevant_attr_names = self.get_relevant_attributes()
         for attr_name in results_relevant_attr_names:
             file_path = os.path.join(
@@ -210,7 +212,11 @@ class Results(object):
             samples = getattr(self, attr_name)
             if len(samples) == 0:
                 continue
-            df = pd.DataFrame({"samples": samples})
+            
+            # Transfer GPU objects back to CPU RAM so pandas can process them
+            safe_samples = [backend.asnumpy(s) for s in samples]
+            
+            df = pd.DataFrame({"samples": safe_samples})
             if self.overwrite_sample_files:
                 df.to_csv(file_path, mode="w", index=False)
             else:
@@ -240,7 +246,7 @@ class Results(object):
         Returns:
             list[Results]: A list of loaded Results objects.
         """
-        output_dirs = sorted(list(glob.glob(f"{root_dir}/output_*")))
+        output_dirs = sorted(glob.glob(os.path.join(root_dir, "*")))
 
         if len(output_dirs) == 0:
             print("[WARNING]: Results.load_many_from_dir did not find any results")

@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """Implements ITU-R P.452 clear-air propagation model and related calculations."""
 import numpy as np
@@ -1613,6 +1614,8 @@ class PropagationClearAir(Propagation):
         deltaN = np.asarray(self.model_params.delta_N)
         if self.model_params.percentage_p == 'RANDOM':
             p = 50 * self.random_number_gen.rand(distance.size)
+        elif self.model_params.percentage_p == 'RANDOM_CENARIO':
+            p = 50 * self.random_number_gen.rand(1) * np.ones(distance.size)
         else:
             p = float(self.model_params.percentage_p) * np.ones(distance.size)
 
@@ -1624,13 +1627,96 @@ class PropagationClearAir(Propagation):
 
         # Modify the path according to Section 4.5.4, Step 1  and compute clutter losses
         # consider no obstacles profile
-        profile_length = 100
-        num_dists = distance.size
-        d = np.empty([num_dists, profile_length])
-        for ii in range(num_dists):
-            d[ii, :] = np.linspace(0, distance[0][ii], profile_length)
+        if self.model_params.is_terrain:
+            # --- RNG and distribution parameters ---------------------------------
+            rng = np.random.default_rng()
 
-        h = np.zeros(d.shape)
+            # Height distribution: t-location-scale
+            # From your fit: μ, σ², ν  (adjust if your numbers change)
+            nu_h      = 1.525           # degrees of freedom
+            mu_h      = 0         # location [m]
+            sigma_h   = 24.52
+
+            # Distance between peaks/valleys: lognormal
+            # y(x) = 1/(x σ √(2π)) exp(-(log x - μ)²/(2σ²))
+            # Use the μ, σ² you fitted (careful with units: km vs m).
+            mu_d      = 1.06           # mean in log-space
+            sigma_d   = 0.814
+
+            # ----------------------------------------------------------------------
+            # Build random profiles: d[ii, :] and h[ii, :] for each link
+            #   - d starts at 0 and ends exactly at distance[0][ii]
+            #   - h starts at 0 and ends at 0
+            #   - intermediate h follow t-location-scale
+            #   - spacings follow lognormal
+            # ----------------------------------------------------------------------
+            num_dists = distance.size
+
+            profiles_d = []
+            profiles_h = []
+
+            rng = np.random.default_rng()
+
+            total_dist = float(np.min(distance))    # use shortest path as reference
+            while True:   # <-- loop gerador até passar no critério
+
+                d_vals = [0.0]
+                h_vals = [0.0]
+
+                # Generate a single profile realization
+                while d_vals[-1] < total_dist:
+
+                    # distance step (lognormal, matching Matlab)
+                    step = rng.lognormal(mean=mu_d, sigma=sigma_d)
+                    next_d = d_vals[-1] + step
+
+                    if next_d >= total_dist:
+                        # final point: snap exactly to total distance
+                        d_vals.append(total_dist)
+                        h_vals.append(0.0)
+                        break
+
+                    # add next segment
+                    d_vals.append(next_d)
+
+                    # height sample (t-location-scale)
+                    t_sample = rng.standard_t(df=nu_h)
+                    h_sample = mu_h + sigma_h * t_sample
+                    h_vals.append(h_sample)
+
+                # --------------------------
+                # Aqui está sua condição nova
+                # --------------------------
+                if len(d_vals) > 3:
+                    break   # OK → finaliza
+                
+            # Convert to arrays
+            profile_d = np.array(d_vals, dtype=float)
+            profile_h = np.array(h_vals, dtype=float)
+
+            # ============================================================
+            # 2) Repeat profile for all num_dists
+            # ============================================================
+
+            num_dists = distance.size
+            profile_length = len(profile_d)
+
+            d = np.zeros((num_dists, profile_length))
+            h = np.zeros((num_dists, profile_length))
+
+            for ii in range(num_dists):
+                d[ii, :] = profile_d
+                h[ii, :] = profile_h
+                d[ii, -1] = distance[0, ii]
+                h[ii, -1] = 0.0  # garante topo plano no final
+        else:
+            profile_length = 100
+            num_dists = distance.size
+            d = np.empty([num_dists, profile_length])
+            for ii in range(num_dists):
+                d[ii, :] = np.linspace(0, distance[0][ii], profile_length)
+
+            h = np.zeros(d.shape)
 
         ha_t = []
         ha_r = []
@@ -1823,7 +1909,8 @@ class PropagationClearAir(Propagation):
             clutter_loss = self.clutter.get_loss(
                 frequency=frequency * 1000,
                 distance=distance * 1000,
-                station_type=StationType.FSS_ES,
+                clutter_scenario="terrestrial",  # Always terrestrial for P.452
+                clutter_type=self.model_params.clutter_type
             )
         else:
             clutter_loss = np.zeros(distance.shape)

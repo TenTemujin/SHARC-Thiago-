@@ -292,6 +292,9 @@ imt:
                 sats_per_plane: 32
                 long_asc_deg: 18.0
                 phasing_deg: 3.9
+                model_time_as_random_variable: False
+                t_min: 0.0
+                t_max: null
               - n_planes: 12
                 inclination_deg: 26.0
                 perigee_alt_km: 580.0
@@ -299,6 +302,9 @@ imt:
                 sats_per_plane: 20
                 long_asc_deg: 30.0
                 phasing_deg: 2.0
+                model_time_as_random_variable: False
+                t_min: 0.0
+                t_max: null
               - n_planes: 26
                 inclination_deg: 97.77
                 perigee_alt_km: 595
@@ -306,6 +312,9 @@ imt:
                 sats_per_plane: 30
                 long_asc_deg: 14.0
                 phasing_deg: 7.8
+                model_time_as_random_variable: False
+                t_min: 0.0
+                t_max: null
     ###########################################################################
     # Defines the antenna model to be used in compatibility studies between
     # IMT and other services in adjacent band
@@ -606,6 +615,11 @@ imt:
         # difference between longitudes of IMT-NTN station and FSS-ES system [deg]
         #   (positive if space-station is to the East of earth-station)
         earth_station_long_diff_deg: 0
+        # Average height of clutter. According to 2018 it can be "Low", "Mid" or "High"
+        mean_clutter_height: "High" 
+        # Percentage of stations below rooftop (To apply clutter)
+        below_rooftop: 100
+
 single_earth_station:
     ###########################################################################
     # Sensor center frequency [MHz]
@@ -751,6 +765,10 @@ single_earth_station:
         # difference between longitudes of IMT-NTN station and FSS-ES system [deg]
         #   (positive if space-station is to the East of earth-station)
         earth_station_long_diff_deg: 10
+        # Average height of clutter. According to 2018 it can be "Low", "Mid" or "High"
+        mean_clutter_height: "High" 
+        # Percentage of stations below rooftop (To apply clutter)
+        below_rooftop: 100
 
     ###########################################################################
     # season - season of the year.
@@ -799,7 +817,8 @@ single_earth_station:
         ###########################################################################
         # determine whether clutter loss following ITU-R P.2108 is added (TRUE/FALSE)
         clutter_loss: TRUE
-
+        # Determine if clutter is applied to "one_end" or "both)ends"
+        clutter_type: "one_end"
     # HDFSS propagation parameters
     param_hdfss:
         ###########################################################################
@@ -895,11 +914,18 @@ single_space_station:
         ###########################################################################
         # earth station lat long [deg]
         es_long_deg: 1
+        # Where to point antenna if azimuth|elevation use "POINTING_AT_LAT_LONG_ALT"
+        # latitude [deg]
+        pointing_at_lat: 0.
+        # longitude [deg]
+        pointing_at_long: 0.
+        # altitude [m]
+        pointing_at_alt: 0.
         ###########################################################################
         # Antenna azimuth angle [degrees]
         azimuth:
             ###########################################################################
-            # Type of azimuth. May be "FIXED" or "POINTING_AT_IMT"
+            # Type of azimuth. May be "FIXED", "POINTING_AT_IMT" or "POINTING_AT_LAT_LONG_ALT"
             type: POINTING_AT_IMT
             ###########################################################################
             # Arbitrary value of azimuth when type == "FIXED" [deg]
@@ -908,7 +934,7 @@ single_space_station:
         # Antenna elevation angle [degrees]
         elevation:
             ###########################################################################
-            # Type of elevation. May be "FIXED" or "POINTING_AT_IMT"
+            # Type of elevation. May be "FIXED", "POINTING_AT_IMT" or "POINTING_AT_LAT_LONG_ALT"
             type: POINTING_AT_IMT
             ###########################################################################
             # Arbitrary value of elevation when type == "FIXED" [deg]
@@ -1071,12 +1097,11 @@ mss_d2d:
     # Antenna pattern from ITU-R S.1528
     # Possible values: "ITU-R-S.1528-Section1.2", "ITU-R-S.1528-LEO"
     antenna_pattern: ITU-R-S.1528-Taylor
-    # Radius of the antenna's circular aperture in meters
-    antenna_diamter: 1.0
-    # The required near-in-side-lobe level (dB) relative to peak gain
-    antenna_l_s: -6.75
-    # 3 dB beamwidth angle (3 dB below maximum gain) [degrees]
-    antenna_3_dB_bw: 4.4127
+    antenna_s1528:
+        # The required near-in-side-lobe level (dB) relative to peak gain
+        antenna_l_s: -6.75
+        # 3 dB beamwidth angle (3 dB below maximum gain) [degrees]
+        antenna_3_dB_bw: 4.4127
     # channel model, possible values are "FSPL" (free-space path loss),
     #                                    "SatelliteSimple" (FSPL + 4 + clutter loss)
     #                                    "P619"
@@ -1097,7 +1122,10 @@ mss_d2d:
         ###########################################################################
         # year season: SUMMER of WINTER
         season: SUMMER
-
+        # Average height of clutter. According to 2018 it can be "Low", "Mid" or "High"
+        mean_clutter_height: "High" 
+        # Percentage of stations below rooftop (To apply clutter)
+        below_rooftop: 100
     # Orbit parameters
     orbit:
         # Number of planes

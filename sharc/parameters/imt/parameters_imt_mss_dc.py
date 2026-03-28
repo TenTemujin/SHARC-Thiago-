@@ -6,7 +6,11 @@ from pathlib import Path
 import shapely as shp
 
 from sharc.support.sharc_utils import load_gdf
-from sharc.support.sharc_geom import shrink_countries_by_km, generate_grid_in_multipolygon
+from sharc.support.sharc_geom import (
+    shrink_countries_by_km,
+    generate_grid_in_multipolygon,
+    shrink_lonlat_polygon_by_km,
+)
 from sharc.satellite.utils.sat_utils import lla2ecef
 from sharc.parameters.parameters_base import ParametersBase
 from sharc.parameters.parameters_orbit import ParametersOrbit
@@ -131,10 +135,145 @@ class ParametersSectorPositioning(ParametersBase):
 
     @dataclass
     class ParametersServiceGrid(ParametersBase):
+        enable_fixed_lat_lons_for_grid: bool = False
+        fixed_lats: list = field(default_factory=lambda: [500.])
+        fixed_lons: list = field(default_factory=lambda: [500.])
+
         country_shapes_filename: Path = SHARC_ROOT_DIR / "sharc" / \
             "data" / "countries" / "ne_110m_admin_0_countries.shp"
 
+        @dataclass
+        class ParametersExclusionZone(ParametersBase):
+            @dataclass
+            class ParametersCircle(ParametersBase):
+                center_lat: typing.Optional[float] = None
+                center_lon: typing.Optional[float] = None
+                radius_km: typing.Optional[float] = None
+
+                _polygon: shp.Polygon = None
+
+                def validate(self, ctx):
+                    """
+                    Validates instance parameters.
+
+                    Ensures attributes make sense
+
+                    Parameters
+                    ----------
+                    ctx : str
+                        Context string for error messages.
+
+                    Raises
+                    ------
+                    ValueError
+                        If a parameter is not valid.
+                    """
+                    if None in [
+                        self.center_lat,
+                        self.center_lon,
+                        self.radius_km,
+                    ]:
+                        raise ValueError(
+                            f"{ctx}.(center_lat|center_lon|radius_km) need to be set"
+                        )
+
+                    if self.radius_km <= 0:
+                        raise ValueError(f"{ctx}.radius_km needs to be positive")
+
+                    if not (-180. <= self.center_lon <= 180.):
+                        raise ValueError(f"{ctx}.center_lon needs to be in [-180, 180]")
+
+                    if not (-90. <= self.center_lat <= 90.):
+                        raise ValueError(f"{ctx}.center_lat needs to be in [-90, 90]")
+
+                    super().validate(ctx)
+
+                    self._calculate_polygon()
+
+                def _calculate_polygon(self):
+                    """
+                    Calculates circle lon,lat polygon according to its attributes
+                    """
+                    self._polygon = shrink_lonlat_polygon_by_km(
+                        shp.geometry.Point(self.center_lon, self.center_lat),
+                        -self.radius_km
+                    )
+
+            __ALLOWED_TYPES = [None, "CIRCLE"]
+            type: typing.Literal[None, "CIRCLE"] = None
+
+            circle: ParametersCircle = field(default_factory=ParametersCircle)
+
+            _polygon: shp.geometry.Polygon = None
+
+            def validate(self, ctx):
+                """
+                Validates instance parameters.
+
+                Ensures attributes make sense
+
+                Parameters
+                ----------
+                ctx : str
+                    Context string for error messages.
+
+                Raises
+                ------
+                ValueError
+                    If a parameter is not valid.
+                """
+                if self.type not in self.__ALLOWED_TYPES:
+                    raise ValueError(f"{ctx}.type should be in {self.__ALLOWED_TYPES}")
+
+                if self.type is None:
+                    return
+
+                if self.type == "CIRCLE":
+                    self.circle.validate(f"{ctx}.circle")
+                    self._polygon = self.circle._polygon
+                else:
+                    raise NotImplementedError(
+                        "No validation implemented for\n"
+                        f"\t{ctx}.type == {self.type}"
+                    )
+
+                if (not self._polygon.is_valid
+                    or self._polygon.is_empty
+                    or self._polygon.area <= 0
+                ):
+                    raise Exception(f"Bad {ctx}._polygon was generated")
+
+            def _calculate_polygon(self):
+                if self.type == "CIRCLE":
+                    self.circle._calculate_polygon()
+                    self._polygon = self.circle._polygon
+                elif self.type is None:
+                    self._polygon = None
+                else:
+                    raise NotImplementedError(
+                        f"Polygon calculation for type = {self.type}"
+                    )
+
+            def apply_exclusion_zone(self, lon, lat):
+                """
+                Returns coordinates that are not contained in polygon
+                """
+                if self.type is None:
+                    return np.stack((lon, lat))
+
+                msk = ~shp.vectorized.contains(
+                    self._polygon,
+                    lon,
+                    lat,
+                )
+
+                return np.stack((lon[msk], lat[msk]))
+
         country_names: list[str] = field(default_factory=lambda: list([""]))
+
+        transform_grid_randomly: bool = False
+
+        grid_exclusion_zone: ParametersExclusionZone = field(default_factory=ParametersExclusionZone)
 
         # margin from inside of border [km]
         # if positive, makes border smaller by x km
@@ -164,6 +303,19 @@ class ParametersSectorPositioning(ParametersBase):
             ctx : str
                 Context string for error messages.
             """
+            if self.enable_fixed_lat_lons_for_grid:
+                if len(self.fixed_lats) != len(self.fixed_lons):
+                    raise ValueError(
+                        f"{ctx}.fixed_lats must have the same number of elements as {ctx}.fixed_lons"
+                    )
+                if not all([-90. <= lat <= 90 for lat in self.fixed_lats]):
+                    raise ValueError(
+                        f"{ctx}.fixed_lats must have all values in [-90, 90] degrees"
+                    )
+                if not all([-180. <= lon <= 180 for lon in self.fixed_lons]):
+                    raise ValueError(
+                        f"{ctx}.fixed_lons must have all values in [-180, 180] degrees"
+                    )
             # conditional is weird due to suboptimal way of working with nested
             # array parameters
             if len(self.country_names) == 0 or (
@@ -197,9 +349,9 @@ class ParametersSectorPositioning(ParametersBase):
                 raise ValueError(
                     f"{ctx}.eligible_sats_margin_from_border needs to be a number")
 
-            self.reset_grid(ctx)
-
             super().validate(ctx)
+
+            self._load_geom_from_file_if_needed(ctx)
 
         def load_from_active_sat_conditions(
             self,
@@ -218,13 +370,37 @@ class ParametersSectorPositioning(ParametersBase):
             if self.eligible_sats_margin_from_border is None:
                 self.eligible_sats_margin_from_border = sat_is_active_if.lat_long_inside_country.margin_from_border
 
-        def reset_grid(self, ctx: str, force_update=False):
+        def reset_grid(
+            self,
+            ctx: str,
+            rng: np.random.RandomState,
+            force_update=False,
+        ):
             """
             After creating grid, there are some features that can only be implemented
-            with knowledge of other parts of the simulator. This method's purpose is
-            to run only once at the start of the simulation
+            with knowledge of other parts of the simulator.
             """
-            if self.lon_lat_grid is not None and not force_update:
+            self._load_geom_from_file_if_needed(ctx, force_update)
+
+            if not self.enable_fixed_lat_lons_for_grid:
+                self.lon_lat_grid = generate_grid_in_multipolygon(
+                    self.grid_borders_polygon,
+                    self.beam_radius,
+                    self.transform_grid_randomly,
+                    rng
+                )
+            else:
+                self.lon_lat_grid = np.stack((self.fixed_lons, self.fixed_lats))
+
+            self.lon_lat_grid = self.grid_exclusion_zone.apply_exclusion_zone(
+                lon, lat
+            )
+
+            self.ecef_grid = lla2ecef(
+                self.lon_lat_grid[1], self.lon_lat_grid[0], 0)
+
+        def _load_geom_from_file_if_needed(self, ctx: str, force_update=False):
+            if self.eligibility_polygon is not None and not force_update:
                 return
             filtered_gdf = load_gdf(
                 self.country_shapes_filename,
@@ -239,17 +415,13 @@ class ParametersSectorPositioning(ParametersBase):
             shrinked = shrink_countries_by_km(
                 filtered_gdf.geometry.values, self.grid_margin_from_border
             )
-            polygon = shp.ops.unary_union(shrinked)
-            assert polygon.is_valid, shp.validation.explain_validity(polygon)
-            assert not polygon.is_empty, "Can't have a empty polygon as filter"
+            self.grid_borders_polygon = shp.ops.unary_union(shrinked)
 
-            self.lon_lat_grid = generate_grid_in_multipolygon(
-                polygon,
-                self.beam_radius
-            )
+            assert self.grid_borders_polygon.is_valid, \
+                shp.validation.explain_validity(self.grid_borders_polygon)
 
-            self.ecef_grid = lla2ecef(
-                self.lon_lat_grid[1], self.lon_lat_grid[0], 0)
+            assert not self.grid_borders_polygon.is_empty, \
+                "Can't have a empty grid_borders_polygon as filter"
 
             self.eligibility_polygon = shp.ops.unary_union(shrink_countries_by_km(
                 filtered_gdf.geometry.values, self.eligible_sats_margin_from_border

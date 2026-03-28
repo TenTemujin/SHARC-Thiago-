@@ -137,11 +137,14 @@ class TopologyHotspot(Topology):
                                 "ERROR\nInfinite loop while creating hotspots.\n \
                                 Try less hotspots per cell or greater macro cell intersite distance.\n",
                             )
-                            sys.exit(1)
+                            return
                 # if num_attempts > 1: print("number of attempts: {}".format(num_attempts))
-            x = np.concatenate([x, hotspot_x])
-            y = np.concatenate([y, hotspot_y])
-            azimuth = np.concatenate([azimuth, hotspot_azimuth])
+            x0, y0 = 0.0, 10000.0
+            a, b = 4100.0, 450.0  # semi-comprimentos (m)
+            inside_airport = (np.abs(x0 - hotspot_x) <= a) & (np.abs(y0 - hotspot_y) <= b)      
+            x = np.concatenate([x, hotspot_x[~inside_airport]])
+            y = np.concatenate([y, hotspot_y[~inside_airport]])
+            azimuth = np.concatenate([azimuth, hotspot_azimuth[~inside_airport]])
 
         self.x = x
         self.y = y
@@ -291,12 +294,12 @@ class TopologyHotspot(Topology):
 
 if __name__ == '__main__':
     param = ParametersHotspot()
-    param.num_hotspots_per_cell = 2
+    param.num_hotspots_per_cell = 8
 
-    param.max_dist_hotspot_ue = 60
+    param.max_dist_hotspot_ue = 400
     param.min_dist_bs_hotspot = 0
 
-    intersite_distance = 339.81
+    intersite_distance = 13380
 
     num_clusters = 1
     topology = TopologyHotspot(param, intersite_distance, num_clusters)
@@ -318,6 +321,6 @@ if __name__ == '__main__':
     plt.tight_layout()
 
     axes = plt.gca()
-    axes.set_xlim([-1500, 1000])
+    #axes.set_xlim([-6000, 6000])
 
     plt.show()

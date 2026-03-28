@@ -61,7 +61,7 @@ class SimulationUplink(Simulation):
         # Create the other system (FSS, HAPS, etc...)
         self.system = StationFactory.generate_system(
             self.parameters, self.topology, random_number_gen,
-            geometry_converter=self.geometry_converter
+            coordinate_system=self.coordinate_system
         )
 
         # Create IMT user equipments
@@ -497,7 +497,7 @@ class SimulationUplink(Simulation):
             snapshot_number (int): The current snapshot number.
         """
         if not self.parameters.imt.interfered_with and np.any(self.bs.active):
-            self.results.system_inr.extend(self.system.inr.tolist())
+            self.results.system_inr.extend(self.system.inr.flatten())
             self.results.system_ul_interf_power.extend(
                 [self.system.rx_interference],
             )
@@ -558,9 +558,9 @@ class SimulationUplink(Simulation):
                 self.results.imt_system_antenna_gain.extend(
                     self.imt_system_antenna_gain[np.ix_(sys_active, active_beams)].flatten(),
                 )
-                self.results.imt_system_antenna_gain_adjacent.extend(
-                    self.imt_system_antenna_gain_adjacent[np.ix_(sys_active, active_beams)].flatten(),
-                )
+                if len(self.imt_system_antenna_gain_adjacent):
+                    self.results.imt_system_antenna_gain_adjacent.extend(
+                        self.imt_system_antenna_gain_adjacent[np.ix_(sys_active, active_beams)].flatten(),)
                 self.results.imt_system_path_loss.extend(
                     self.imt_system_path_loss[np.ix_(sys_active, active_beams)].flatten(),
                 )

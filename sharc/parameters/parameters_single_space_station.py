@@ -4,6 +4,7 @@ import typing
 from sharc.parameters.parameters_base import ParametersBase
 from sharc.parameters.parameters_antenna import ParametersAntenna
 from sharc.parameters.parameters_p619 import ParametersP619
+from sharc.parameters.parameter_p528 import ParametersP528
 
 
 @dataclass
@@ -14,6 +15,7 @@ class ParametersSingleSpaceStation(ParametersBase):
     section_name: str = "single_space_station"
     nested_parameters_enabled: bool = True
     is_space_to_earth: bool = True
+    is_global_coordinate_system: bool = False
 
     # Sensor center frequency [MHz]
     frequency: float = None  # Center frequency of the sensor in MHz
@@ -24,7 +26,14 @@ class ParametersSingleSpaceStation(ParametersBase):
     # System receive noise temperature [K]
     noise_temperature: float = None
 
+    # Adjacent channel emission type [dB]
+    # Adjacent Interference filter reception used when this system
+    # is victim. Possible values is ACS and OFF
+    adjacent_ch_reception: typing.Literal[
+        "ACS", "OFF"
+    ] = "OFF"
     # Adjacent channel selectivity [dB]
+    
     adjacent_ch_selectivity: float = None
 
     # Peak transmit power spectral density (clear sky) [dBW/Hz]
@@ -47,6 +56,7 @@ class ParametersSingleSpaceStation(ParametersBase):
     param_p619: ParametersP619 = field(default_factory=ParametersP619)
     # TODO: remove season from system parameter and put it as p619 parameter
     season: typing.Literal["WINTER", "SUMMER"] = "SUMMER"
+    param_p528: ParametersP528 = field(default_factory=ParametersP528)
 
     @dataclass
     class SpaceStationGeometry(ParametersBase):
@@ -57,15 +67,25 @@ class ParametersSingleSpaceStation(ParametersBase):
         es_long_deg: float = -47.882778
         es_lat_deg: float = -15.793889
 
+        # Used if azimuth or elevation are POINTING_AT_LAT_LONG_ALT
+        # [deg]
+        pointing_at_lat: typing.Optional[float] = None
+        # [deg]
+        pointing_at_long: typing.Optional[float] = None
+        # [m]
+        pointing_at_alt: typing.Optional[float] = None
+
         @dataclass
         class PointingParam(ParametersBase):
             """
             Defines pointing parameters for the space station geometry.
             """
-            __EXISTING_TYPES = ["FIXED", "POINTING_AT_IMT"]
-            type: typing.Literal["FIXED", "POINTING_AT_IMT"] = None
+            __EXISTING_TYPES = ["FIXED", "POINTING_AT_IMT", "POINTING_AT_LAT_LONG_ALT", "RANDOM_RANGE"]
+            type: typing.Literal["FIXED", "POINTING_AT_IMT", "POINTING_AT_LAT_LONG_ALT", "RANDOM_RANGE"] = None
             fixed: float = None
-
+            min: float = None
+            max: float = None
+            
             def validate(self, ctx):
                 """
                 Validate the PointingParam parameters for correctness.
@@ -83,7 +103,16 @@ class ParametersSingleSpaceStation(ParametersBase):
                                 self.fixed,
                                 float):
                             raise ValueError(f"{ctx}.fixed should be a number")
+                    case "RANDOM_RANGE":
+                        if not isinstance(
+                                self.min,
+                                int) and not isinstance(
+                                self.min,
+                                float):
+                            raise ValueError(f"{ctx}.fixed should be a number")
                     case "POINTING_AT_IMT":
+                        pass
+                    case "POINTING_AT_LAT_LONG_ALT":
                         pass
                     case _:
                         raise NotImplementedError(
@@ -158,7 +187,8 @@ class ParametersSingleSpaceStation(ParametersBase):
         super().load_parameters_from_file(config_file)
 
         self.propagate_parameters()
-
+        if self.param_p528:
+            self.param_p528.load_from_parameters(self)
         # this should be done by validating this parameters only if it is the selected system on the general section
         # TODO: make this better by changing the Parameters class itself
         should_validate = any(
@@ -174,36 +204,9 @@ class ParametersSingleSpaceStation(ParametersBase):
         """
         Propagate relevant parameters to nested P619 and antenna objects.
         """
-        if self.channel_model == "P619":
-            if self.param_p619.earth_station_alt_m != ParametersP619.earth_station_alt_m:
-                raise ValueError(
-                    f"{self.section_name}.param_p619.earth_station_alt_m should not be set by hand."
-                    "It is automatically set by other parameters in system"
-                )
-            if self.param_p619.earth_station_lat_deg != ParametersP619.earth_station_lat_deg:
-                raise ValueError(
-                    f"{self.section_name}.param_p619.earth_station_lat_deg should not be set by hand."
-                    "It is automatically set by other parameters in system"
-                )
-            if self.param_p619.space_station_alt_m != ParametersP619.space_station_alt_m:
-                raise ValueError(
-                    f"{self.section_name}.param_p619.space_station_alt_m should not be set by hand."
-                    "It is automatically set by other parameters in system"
-                )
-            if self.param_p619.earth_station_lat_deg != ParametersP619.earth_station_lat_deg:
-                raise ValueError(
-                    f"{self.section_name}.param_p619.earth_station_lat_deg should not be set by hand."
-                    "It is automatically set by other parameters in system"
-                )
-        self.param_p619.space_station_alt_m = self.geometry.altitude
+
         self.param_p619.earth_station_alt_m = self.geometry.es_altitude
         self.param_p619.earth_station_lat_deg = self.geometry.es_lat_deg
-
-        if self.geometry.location.type == "FIXED":
-            self.param_p619.earth_station_long_diff_deg = self.geometry.location.fixed.long_deg - \
-                self.geometry.es_long_deg
-        else:
-            self.param_p619.earth_station_long_diff_deg = None
 
         # this is needed because nested parameters
         # don't know/cannot access parents attributes
@@ -233,7 +236,7 @@ class ParametersSingleSpaceStation(ParametersBase):
                 f"{ctx}.season needs to be either 'WINTER' or 'SUMMER'",
             )
 
-        if self.channel_model not in ["FSPL", "P619"]:
+        if self.channel_model not in ["FSPL", "P619", "P528"]:
             raise ValueError(
                 f"{ctx}.channel_model" +
                 "needs to be in ['FSPL', 'P619']",

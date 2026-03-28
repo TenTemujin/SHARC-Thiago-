@@ -5,7 +5,6 @@ Created on Sat Apr 15 16:29:36 2017
 @author: Calil
 """
 
-from sharc.support.named_tuples import AntennaPar
 from numpy import load
 import typing
 
@@ -58,8 +57,8 @@ class ParametersAntennaImt(ParametersBase):
     # PS: it isn't implemented for UEs
     # and current implementation doesn't make sense for UEs
     horizontal_beamsteering_range: tuple[float |
-                                         int, float | int] = (-180., 180.)
-    vertical_beamsteering_range: tuple[float | int, float | int] = (0., 180.)
+                                         int, float | int] = (-180., 179.9999)
+    vertical_beamsteering_range: tuple[float | int, float | int] = (0., 179.9999)
 
     # Mechanical downtilt [degrees].
     # PS: downtilt doesn't make sense on UE's
@@ -95,6 +94,9 @@ class ParametersAntennaImt(ParametersBase):
 
     subarray: ParametersAntennaSubarrayImt = field(
         default_factory=ParametersAntennaSubarrayImt)
+
+    def __post_init__(self):
+        self.normalization_data = None
 
     def load_subparameters(self, ctx: str, params: dict, quiet=True):
         """
@@ -172,11 +174,11 @@ class ParametersAntennaImt(ParametersBase):
                 f"Invalid {ctx}.horizontal_beamsteering_range={self.horizontal_beamsteering_range}\n"
                 "The second value must be bigger than the first"
             )
-        if not all(map(lambda x: x >= -180. and x <= 180.,
+        if not all(map(lambda x: x >= -180. and x < 180.,
                    self.horizontal_beamsteering_range)):
             raise ValueError(
                 f"Invalid {ctx}.horizontal_beamsteering_range={self.horizontal_beamsteering_range}\n"
-                "Horizontal beamsteering limit angles must be in the range [-180, 180]"
+                "Horizontal beamsteering limit angles must be in the range [-180, 180)"
             )
 
         if isinstance(self.vertical_beamsteering_range, list):
@@ -197,21 +199,16 @@ class ParametersAntennaImt(ParametersBase):
                 f"Invalid {ctx}.vertical_beamsteering_range={self.vertical_beamsteering_range}\n"
                 "The second value must be bigger than the first"
             )
-        if not all(map(lambda x: x >= 0. and x <= 180.,
+        if not all(map(lambda x: x >= 0. and x < 180.,
                    self.vertical_beamsteering_range)):
             raise ValueError(
                 f"Invalid {ctx}.vertical_beamsteering_range={self.vertical_beamsteering_range}\n"
-                "vertical beamsteering limit angles must be in the range [0, 180]"
+                "vertical beamsteering limit angles must be in the range [0, 180)"
             )
 
-    def get_antenna_parameters(self) -> AntennaPar:
+    def get_normalization_data_if_needed(self):
         """
-        Get the antenna parameters as an AntennaPar object.
-
-        Returns
-        -------
-        AntennaPar
-            The antenna parameters object constructed from the current configuration.
+        This loads normalization data if normalization should be applied
         """
         if self.normalization:
             # Load data, save it in dict and close it
@@ -221,23 +218,16 @@ class ParametersAntennaImt(ParametersBase):
             data.close()
         else:
             self.normalization_data = None
-        tpl = AntennaPar(
-            self.adjacent_antenna_model,
-            self.normalization,
-            self.normalization_data,
-            self.element_pattern,
-            self.element_max_g,
-            self.element_phi_3db,
-            self.element_theta_3db,
-            self.element_am,
-            self.element_sla_v,
-            self.n_rows,
-            self.n_columns,
-            self.element_horiz_spacing,
-            self.element_vert_spacing,
-            self.multiplication_factor,
-            self.minimum_array_gain,
-            self.downtilt,
-        )
 
-        return tpl
+    def get_antenna_parameters(self) -> "ParametersAntennaImt":
+        """
+        Get the antenna parameters loadind normalization values if needed.
+
+        Returns
+        -------
+        ParametersAntennaImt
+            The antenna parameters object constructed from the current configuration.
+        """
+        self.get_normalization_data_if_needed()
+
+        return self

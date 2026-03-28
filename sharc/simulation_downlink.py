@@ -72,7 +72,7 @@ class SimulationDownlink(Simulation):
         # Create the other system (FSS, HAPS, etc...)
         self.system = StationFactory.generate_system(
             self.parameters, self.topology, random_number_gen,
-            geometry_converter=self.geometry_converter
+            coordinate_system=self.coordinate_system
         )
 
         # Create IMT user equipments
@@ -233,11 +233,17 @@ class SimulationDownlink(Simulation):
                 if self.overlapping_bandwidth > 0:
                     # in_band_interf_power = self.param_system.tx_power_density + \
                     #     10 * np.log10(self.overlapping_bandwidth * 1e6) + 30
-                    in_band_interf_power = \
-                        self.param_system.tx_power_density + 10 * np.log10(
-                            self.ue.bandwidth[ue, np.newaxis] * 1e6
-                        ) + 10 * np.log10(weights)[:, np.newaxis] - \
-                        self.coupling_loss_imt_system[ue, :][:, active_sys]
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            category=RuntimeWarning,
+                            message="divide by zero encountered in log10",
+                        )
+                        in_band_interf_power = \
+                            self.param_system.tx_power_density + 10 * np.log10(
+                                self.ue.bandwidth[ue, np.newaxis] * 1e6
+                            ) + 10 * np.log10(weights)[:, np.newaxis] - \
+                            self.coupling_loss_imt_system[ue, :][:, active_sys]
 
             oob_power = np.resize(-500., (len(ue), 1))
             if self.adjacent_channel:
@@ -325,7 +331,7 @@ class SimulationDownlink(Simulation):
 
                     # tx_oob_in_measurement = (tx_pow_lin / aclr)
                     # => approx. PSD = (tx_pow_lin / aclr) / measurement_bw
-                    # approximated received tx_oob = PSD * non_overlap_imt_bw
+                    # approximated received tx_oob  = PSD * non_overlap_imt_bw
                     tx_oob[::] = self.param_system.tx_power_density + \
                         10 * np.log10(1e6) -  \
                         aclr_dB + 10 * np.log10(
@@ -414,10 +420,105 @@ class SimulationDownlink(Simulation):
         # applying a bandwidth scaling factor since UE transmits on a portion
         # of the interfered systems bandwidth
         # calculate interference only from active UE's
-        rx_interference = 0
+        pow_coch = -np.inf
+        # These are in dB. Turn to zero linear.
+        tx_oob = -np.inf
+        rx_oob = -np.inf
 
         bs_active = np.where(self.bs.active)[0]
+        # this implm assumes some parameters will be same for all interferring BS's
+        frst_bs = bs_active[0]
+        if self.co_channel:
+            ue = self.link[frst_bs]
+            weights = self.calculate_bw_weights(
+                self.ue.bandwidth[ue],
+                self.ue.center_freq[ue],
+                self.param_system.bandwidth,
+                self.param_system.frequency,
+            )
+
+            interference = self.bs.tx_power[frst_bs]
+            pow_coch = 10 * np.log10(
+                weights * np.power(
+                    10,
+                    0.1 * interference,
+                ),
+            )
+
+        if self.adjacent_channel:
+            # Calculate how much power is emitted in the adjacent channel:
+            if self.parameters.imt.adjacent_ch_emissions == "SPECTRAL_MASK":
+                # The unwanted emission is calculated in terms of TRP (after
+                # antenna). In SHARC implementation, ohmic losses are already
+                # included in coupling loss. Then, care has to be taken;
+                # otherwise ohmic loss will be included twice.
+                tx_oob = self.bs.spectral_mask.power_calc(
+                    self.param_system.frequency,
+                    self.system.bandwidth) + self.parameters.imt.bs.ohmic_loss
+
+            elif self.parameters.imt.adjacent_ch_emissions == "ACLR":
+                non_overlap_sys_bw = self.param_system.bandwidth - self.overlapping_bandwidth
+                # NOTE: approximated equal to IMT bw
+                measurement_bw = self.parameters.imt.bandwidth
+                aclr_dB = self.parameters.imt.bs.adjacent_ch_leak_ratio
+
+                if non_overlap_sys_bw > measurement_bw:
+                    # NOTE: ACLR defines total leaked power over a fixed measurement bandwidth.
+                    # If the victim bandwidth is wider, you’re assuming the same leakage
+                    # profile extends beyond the ACLR-defined region, which may overestimate interference
+                    # FIXME: if the victim bw fully contains tx bw, then
+                    # EACH region should be <= measurement_bw
+                    warn(
+                        "Using IMT ACLR into system, but ACLR measurement bw is "
+                        f"{measurement_bw} while the system bw is bigger ({non_overlap_sys_bw}).\n"
+                        "Are you sure you intend to apply ACLR to the entire system bw?"
+                    )
+
+                # tx_oob_in_measurement = (tx_pow_lin / aclr)
+                # => approx. PSD = (tx_pow_lin / aclr) / measurement_bw
+                # approximated received tx_oob = PSD * non_overlap_sys_bw
+                # NOTE: we don't get total power, but power per beam
+                # because later broadcast will sum this tx_oob `k` times
+                tx_oob = self.bs.tx_power[frst_bs] - aclr_dB + 10 * np.log10(
+                    non_overlap_sys_bw / measurement_bw
+                )
+            elif self.parameters.imt.adjacent_ch_emissions == "OFF":
+                pass
+            else:
+                raise ValueError(
+                    f"No implementation for self.parameters.imt.adjacent_ch_emissions == {
+                        self.parameters.imt.adjacent_ch_emissions}")
+
+            # Calculate how much power is received in the adjacent channel
+            if self.param_system.adjacent_ch_reception == "ACS":
+                non_overlap_imt_bw = self.parameters.imt.bandwidth - self.overlapping_bandwidth
+                tx_bw = self.parameters.imt.bandwidth
+                acs_dB = self.param_system.adjacent_ch_selectivity
+
+                # NOTE: only the power not overlapping is attenuated by ACS
+                # PSD = tx_pow_lin / tx_bw
+                # tx_pow_adj_lin = PSD * non_overlap_imt_bw
+                # rx_oob = tx_pow_adj_lin / acs
+                rx_oob = self.bs.tx_power[frst_bs] + 10 * np.log10(
+                    non_overlap_imt_bw / tx_bw
+                ) - acs_dB
+            elif self.param_system.adjacent_ch_reception == "OFF":
+                if self.parameters.imt.adjacent_ch_emissions == "OFF":
+                    raise ValueError(
+                        "parameters.imt.adjacent_ch_emissions and parameters.imt.adjacent_ch_reception"
+                        " cannot be both set to \"OFF\"")
+            else:
+                raise ValueError(
+                    f"No implementation for self.param_system.adjacent_ch_reception == {
+                        self.param_system.adjacent_ch_reception}")
+
         sys_active = np.where(self.system.active)[0]
+        if len(sys_active) > 1:
+            raise NotImplementedError(
+                "Implementation does not support victim system with more than 1 active station"
+            )
+
+        rx_interference = 0
         for bs in bs_active:
             active_beams = [
                 i for i in range(
@@ -426,95 +527,12 @@ class SimulationDownlink(Simulation):
                     self.parameters.imt.ue.k,
                 )
             ]
-
             if self.co_channel:
-                ue = self.link[bs]
-                weights = self.calculate_bw_weights(
-                    self.ue.bandwidth[ue],
-                    self.ue.center_freq[ue],
-                    self.param_system.bandwidth,
-                    self.param_system.frequency,
-                )
-
-                interference = self.bs.tx_power[bs] - \
-                    self.coupling_loss_imt_system[active_beams, sys_active]
                 rx_interference += np.sum(
-                    weights * np.power(
-                        10,
-                        0.1 * interference,
-                    ),
+                    10 ** (0.1 * (pow_coch - self.coupling_loss_imt_system[active_beams, sys_active]))
                 )
 
             if self.adjacent_channel:
-                # These are in dB. Turn to zero linear.
-                tx_oob = -np.inf
-                rx_oob = -np.inf
-                # Calculate how much power is emitted in the adjacent channel:
-                if self.parameters.imt.adjacent_ch_emissions == "SPECTRAL_MASK":
-                    # The unwanted emission is calculated in terms of TRP (after
-                    # antenna). In SHARC implementation, ohmic losses are already
-                    # included in coupling loss. Then, care has to be taken;
-                    # otherwise ohmic loss will be included twice.
-                    tx_oob = self.bs.spectral_mask.power_calc(
-                        self.param_system.frequency,
-                        self.system.bandwidth) + self.parameters.imt.bs.ohmic_loss
-
-                elif self.parameters.imt.adjacent_ch_emissions == "ACLR":
-                    non_overlap_sys_bw = self.param_system.bandwidth - self.overlapping_bandwidth
-                    # NOTE: approximated equal to IMT bw
-                    measurement_bw = self.parameters.imt.bandwidth
-                    aclr_dB = self.parameters.imt.bs.adjacent_ch_leak_ratio
-
-                    if non_overlap_sys_bw > measurement_bw:
-                        # NOTE: ACLR defines total leaked power over a fixed measurement bandwidth.
-                        # If the victim bandwidth is wider, you’re assuming the same leakage
-                        # profile extends beyond the ACLR-defined region, which may overestimate interference
-                        # FIXME: if the victim bw fully contains tx bw, then
-                        # EACH region should be <= measurement_bw
-                        warn(
-                            "Using IMT ACLR into system, but ACLR measurement bw is "
-                            f"{measurement_bw} while the system bw is bigger ({non_overlap_sys_bw}).\n"
-                            "Are you sure you intend to apply ACLR to the entire system bw?"
-                        )
-
-                    # tx_oob_in_measurement = (tx_pow_lin / aclr)
-                    # => approx. PSD = (tx_pow_lin / aclr) / measurement_bw
-                    # approximated received tx_oob = PSD * non_overlap_sys_bw
-                    # NOTE: we don't get total power, but power per beam
-                    # because later broadcast will sum this tx_oob `k` times
-                    tx_oob = self.bs.tx_power[bs] - aclr_dB + 10 * np.log10(
-                        non_overlap_sys_bw / measurement_bw
-                    )
-                elif self.parameters.imt.adjacent_ch_emissions == "OFF":
-                    pass
-                else:
-                    raise ValueError(
-                        f"No implementation for self.parameters.imt.adjacent_ch_emissions == {
-                            self.parameters.imt.adjacent_ch_emissions}")
-
-                # Calculate how much power is received in the adjacent channel
-                if self.param_system.adjacent_ch_reception == "ACS":
-                    non_overlap_imt_bw = self.parameters.imt.bandwidth - self.overlapping_bandwidth
-                    tx_bw = self.parameters.imt.bandwidth
-                    acs_dB = self.param_system.adjacent_ch_selectivity
-
-                    # NOTE: only the power not overlapping is attenuated by ACS
-                    # PSD = tx_pow_lin / tx_bw
-                    # tx_pow_adj_lin = PSD * non_overlap_imt_bw
-                    # rx_oob = tx_pow_adj_lin / acs
-                    rx_oob = self.bs.tx_power[bs] + 10 * np.log10(
-                        non_overlap_imt_bw / tx_bw
-                    ) - acs_dB
-                elif self.param_system.adjacent_ch_reception == "OFF":
-                    if self.parameters.imt.adjacent_ch_emissions == "OFF":
-                        raise ValueError(
-                            "parameters.imt.adjacent_ch_emissions and parameters.imt.adjacent_ch_reception"
-                            " cannot be both set to \"OFF\"")
-                else:
-                    raise ValueError(
-                        f"No implementation for self.param_system.adjacent_ch_reception == {
-                            self.param_system.adjacent_ch_reception}")
-
                 # oob_power per beam
                 # NOTE: we only consider one beam since all beams should have gain
                 # of a single element for IMT, and as such the coupling loss should be the
@@ -526,15 +544,17 @@ class SimulationDownlink(Simulation):
                 # so more would have to be fixed before this
                 assert np.all(adj_loss == adj_loss.flat[0])
 
-                tx_oob -= adj_loss[0, :]
+                tx_oob_s = tx_oob - adj_loss[0, :]
                 if self.param_system.adjacent_ch_reception != "OFF":
-                    rx_oob -= self.coupling_loss_imt_system[active_beams, sys_active]
+                    rx_oob_s = rx_oob - self.coupling_loss_imt_system[active_beams, sys_active]
+                else:
+                    rx_oob_s = -np.inf
 
                 # Out of band power
                 # sum linearly power leaked into band and power received in the
                 # adjacent band
                 oob_power = 10 * np.log10(
-                    10 ** (0.1 * tx_oob) + 10 ** (0.1 * rx_oob)
+                    10 ** (0.1 * tx_oob_s) + 10 ** (0.1 * rx_oob_s)
                 )
 
                 # System rx interference

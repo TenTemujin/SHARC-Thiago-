@@ -63,9 +63,9 @@ class ParametersTest(unittest.TestCase):
         self.assertEqual(
             self.parameters.imt.ue.antenna.array.horizontal_beamsteering_range,
             (-180.,
-             180.))
+                 179.9999))
         self.assertEqual(
-            self.parameters.imt.ue.antenna.array.vertical_beamsteering_range, (0., 180.))
+            self.parameters.imt.ue.antenna.array.vertical_beamsteering_range, (0., 179.9999))
         self.assertEqual(self.parameters.imt.ue.k, 3)
         self.assertEqual(self.parameters.imt.ue.k_m, 1)
         self.assertEqual(self.parameters.imt.ue.indoor_percent, 5.0)
@@ -171,6 +171,17 @@ class ParametersTest(unittest.TestCase):
         self.assertEqual(
             self.parameters.imt.topology.central_longitude, -12.134)
 
+        # Now check S.1528 antenna parameters when used in DC-MSS-IMT
+        self.parameters.imt.bs.antenna.pattern = "ITU-R-S.1528-Taylor"
+        self.parameters.imt.bs.antenna.validate("test_imt_parameters")
+        self.assertEqual(self.parameters.imt.bs.antenna.gain, 34.1)
+        self.assertEqual(self.parameters.imt.bs.antenna.itu_r_s_1528.frequency, 2177.0)
+        self.assertEqual(self.parameters.imt.bs.antenna.itu_r_s_1528.bandwidth, 6.0)
+        self.assertEqual(self.parameters.imt.bs.antenna.itu_r_s_1528.slr, 20)
+        self.assertEqual(self.parameters.imt.bs.antenna.itu_r_s_1528.n_side_lobes, 2)
+        self.assertEqual(self.parameters.imt.bs.antenna.itu_r_s_1528.l_r, 1.6)
+        self.assertEqual(self.parameters.imt.bs.antenna.itu_r_s_1528.l_t, 1.6)
+
         """Test ParametersSubarrayImt
         """
         # testing default value not enabled
@@ -223,6 +234,9 @@ class ParametersTest(unittest.TestCase):
         )
         self.assertEqual(
             self.parameters.imt.topology.single_bs.num_clusters, 2)
+
+        self.assertEqual(
+            self.parameters.imt.topology.single_bs.azimuth, [60.0, 240.0])
 
         """Test ParametersIndoor
         """
@@ -277,6 +291,23 @@ class ParametersTest(unittest.TestCase):
         self.assertEqual(
             self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.beam_radius,
             19000)
+
+        self.assertEqual(
+            self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.grid_exclusion_zone.type,
+            "CIRCLE")
+        self.assertEqual(
+            self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.grid_exclusion_zone.circle.center_lat,
+            -14.123)
+        self.assertEqual(
+            self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.grid_exclusion_zone.circle.center_lon,
+            -47.1)
+        self.assertEqual(
+            self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.grid_exclusion_zone.circle.radius_km,
+            123)
+
+        self.assertEqual(
+            self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.transform_grid_randomly,
+            True)
         self.assertEqual(
             self.parameters.imt.topology.mss_dc.beam_positioning.service_grid.grid_margin_from_border,
             0.11)
@@ -327,6 +358,7 @@ class ParametersTest(unittest.TestCase):
                 'sats_per_plane': 32,
                 'long_asc_deg': 18.0,
                 'phasing_deg': 3.9,
+                "model_time_as_random_variable": False,
             },
             {
                 'n_planes': 12,
@@ -336,6 +368,10 @@ class ParametersTest(unittest.TestCase):
                 'sats_per_plane': 20,
                 'long_asc_deg': 30.0,
                 'phasing_deg': 2.0,
+                "model_time_as_random_variable": True,
+                # checking defaults
+                "t_min": 0.0,
+                "t_max": None,
             },
             {
                 'n_planes': 26,
@@ -345,31 +381,16 @@ class ParametersTest(unittest.TestCase):
                 'sats_per_plane': 30,
                 'long_asc_deg': 14.0,
                 'phasing_deg': 7.8,
+                "model_time_as_random_variable": True,
+                "t_min": 1.0,
+                "t_max": 100.0,
             },
         ]
-        for i, orbit_params in enumerate(
-                self.parameters.imt.topology.mss_dc.orbits):
-            self.assertEqual(
-                orbit_params.n_planes,
-                expected_orbit_params[i]['n_planes'])
-            self.assertEqual(
-                orbit_params.inclination_deg,
-                expected_orbit_params[i]['inclination_deg'])
-            self.assertEqual(
-                orbit_params.perigee_alt_km,
-                expected_orbit_params[i]['perigee_alt_km'])
-            self.assertEqual(
-                orbit_params.apogee_alt_km,
-                expected_orbit_params[i]['apogee_alt_km'])
-            self.assertEqual(
-                orbit_params.sats_per_plane,
-                expected_orbit_params[i]['sats_per_plane'])
-            self.assertEqual(
-                orbit_params.long_asc_deg,
-                expected_orbit_params[i]['long_asc_deg'])
-            self.assertEqual(
-                orbit_params.phasing_deg,
-                expected_orbit_params[i]['phasing_deg'])
+        for i, orbit_params in enumerate(self.parameters.imt.topology.mss_dc.orbits):
+            for k in expected_orbit_params[i].keys():
+                self.assertEqual(
+                    getattr(orbit_params, k),
+                    expected_orbit_params[i][k])
 
     def test_imt_validation(self):
         """
@@ -513,15 +534,7 @@ class ParametersTest(unittest.TestCase):
             1200,
         )
         self.assertEqual(
-            self.parameters.single_earth_station.param_p619.space_station_alt_m,
-            540000,
-        )
-        self.assertEqual(
             self.parameters.single_earth_station.param_p619.earth_station_lat_deg, 13, )
-        self.assertEqual(
-            self.parameters.single_earth_station.param_p619.earth_station_long_diff_deg,
-            10,
-        )
 
         self.assertEqual(
             self.parameters.single_earth_station.param_p452.atmospheric_pressure, 1, )
@@ -621,32 +634,48 @@ class ParametersTest(unittest.TestCase):
         self.assertEqual(self.parameters.mss_d2d.beam_radius, 19001)
         self.assertEqual(self.parameters.mss_d2d.tx_power_density, -30)
         self.assertEqual(self.parameters.mss_d2d.num_sectors, 19)
-        self.assertEqual(self.parameters.mss_d2d.antenna_diamter, 1.0)
-        self.assertEqual(self.parameters.mss_d2d.antenna_l_s, -6.75)
-        self.assertEqual(self.parameters.mss_d2d.antenna_3_dB_bw, 4.4127)
+<<<<<<< HEAD
+        self.assertEqual(self.parameters.mss_d2d.antenna_s1528.antenna_l_s, -6.75)
+        self.assertEqual(self.parameters.mss_d2d.antenna_s1528.antenna_3_dB_bw, 4.4127)
+=======
+>>>>>>> origin/feat/DensPop_IMT_topology
         self.assertEqual(
-            self.parameters.mss_d2d.antenna_pattern,
+            self.parameters.mss_d2d.antenna.pattern,
             'ITU-R-S.1528-Taylor')
         self.assertEqual(
-            self.parameters.mss_d2d.antenna_s1528.antenna_pattern,
-            'ITU-R-S.1528-Taylor')
-        self.assertEqual(
-            self.parameters.mss_d2d.antenna_s1528.antenna_gain, 34.1)
-        self.assertEqual(self.parameters.mss_d2d.antenna_s1528.slr, 20)
-        self.assertEqual(self.parameters.mss_d2d.antenna_s1528.n_side_lobes, 2)
-        self.assertEqual(self.parameters.mss_d2d.antenna_s1528.l_r, 1.6)
-        self.assertEqual(self.parameters.mss_d2d.antenna_s1528.l_t, 1.6)
+            self.parameters.mss_d2d.antenna.gain, 34.1)
+        self.assertEqual(self.parameters.mss_d2d.antenna.itu_r_s_1528.frequency, 2177.0)
+        self.assertEqual(self.parameters.mss_d2d.antenna.itu_r_s_1528.bandwidth, 6.0)
+        self.assertEqual(self.parameters.mss_d2d.antenna.itu_r_s_1528.slr, 20)
+        self.assertEqual(self.parameters.mss_d2d.antenna.itu_r_s_1528.n_side_lobes, 2)
+        self.assertEqual(self.parameters.mss_d2d.antenna.itu_r_s_1528.l_r, 1.6)
+        self.assertEqual(self.parameters.mss_d2d.antenna.itu_r_s_1528.l_t, 1.6)
         self.assertEqual(self.parameters.mss_d2d.channel_model, 'P619')
         self.assertEqual(
             self.parameters.mss_d2d.param_p619.earth_station_alt_m, 0.0)
         self.assertEqual(
             self.parameters.mss_d2d.param_p619.earth_station_lat_deg, 0.0)
-        self.assertEqual(
-            self.parameters.mss_d2d.param_p619.earth_station_long_diff_deg, 0.0)
 
         self.assertEqual(
             self.parameters.mss_d2d.beam_positioning.service_grid.beam_radius,
             19001)
+
+        self.assertEqual(
+            self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone.type,
+            "CIRCLE")
+        self.assertEqual(
+            self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone.circle.center_lat,
+            -14.123)
+        self.assertEqual(
+            self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone.circle.center_lon,
+            120)
+        self.assertEqual(
+            self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone.circle.radius_km,
+            321)
+
+        self.assertEqual(
+            self.parameters.mss_d2d.beam_positioning.service_grid.transform_grid_randomly,
+            True)
         self.assertEqual(
             self.parameters.mss_d2d.beam_positioning.service_grid.grid_margin_from_border,
             0.11)
@@ -694,6 +723,7 @@ class ParametersTest(unittest.TestCase):
                 'sats_per_plane': 32,
                 'long_asc_deg': 18.0,
                 'phasing_deg': 3.9,
+                "model_time_as_random_variable": False,
             },
             {
                 'n_planes': 12,
@@ -703,6 +733,10 @@ class ParametersTest(unittest.TestCase):
                 'sats_per_plane': 20,
                 'long_asc_deg': 30.0,
                 'phasing_deg': 2.0,
+                "model_time_as_random_variable": True,
+                # check defaults
+                "t_min": 0.0,
+                "t_max": None,
             },
             {
                 'n_planes': 26,
@@ -712,30 +746,16 @@ class ParametersTest(unittest.TestCase):
                 'sats_per_plane': 30,
                 'long_asc_deg': 14.0,
                 'phasing_deg': 7.8,
+                "model_time_as_random_variable": True,
+                "t_min": 1.0,
+                "t_max": 100.0,
             },
         ]
         for i, orbit_params in enumerate(self.parameters.mss_d2d.orbits):
-            self.assertEqual(
-                orbit_params.n_planes,
-                expected_orbit_params[i]['n_planes'])
-            self.assertEqual(
-                orbit_params.inclination_deg,
-                expected_orbit_params[i]['inclination_deg'])
-            self.assertEqual(
-                orbit_params.perigee_alt_km,
-                expected_orbit_params[i]['perigee_alt_km'])
-            self.assertEqual(
-                orbit_params.apogee_alt_km,
-                expected_orbit_params[i]['apogee_alt_km'])
-            self.assertEqual(
-                orbit_params.sats_per_plane,
-                expected_orbit_params[i]['sats_per_plane'])
-            self.assertEqual(
-                orbit_params.long_asc_deg,
-                expected_orbit_params[i]['long_asc_deg'])
-            self.assertEqual(
-                orbit_params.phasing_deg,
-                expected_orbit_params[i]['phasing_deg'])
+            for k in expected_orbit_params[i].keys():
+                self.assertEqual(
+                    getattr(orbit_params, k),
+                    expected_orbit_params[i][k])
 
     def test_parameters_single_space_station(self):
         """Test ParametersSinglespaceStation
@@ -764,6 +784,15 @@ class ParametersTest(unittest.TestCase):
         )
         self.assertEqual(
             self.parameters.single_space_station.geometry.es_long_deg, 3.9,
+        )
+        self.assertEqual(
+            self.parameters.single_space_station.geometry.pointing_at_alt, 123,
+        )
+        self.assertEqual(
+            self.parameters.single_space_station.geometry.pointing_at_lat, 12,
+        )
+        self.assertEqual(
+            self.parameters.single_space_station.geometry.pointing_at_long, -1,
         )
         self.assertEqual(
             self.parameters.single_space_station.geometry.azimuth.type,
@@ -819,10 +848,6 @@ class ParametersTest(unittest.TestCase):
             self.parameters.single_space_station.geometry.es_altitude,
         )
         self.assertEqual(
-            self.parameters.single_space_station.param_p619.space_station_alt_m,
-            self.parameters.single_space_station.geometry.altitude,
-        )
-        self.assertEqual(
             self.parameters.single_space_station.param_p619.earth_station_lat_deg,
             self.parameters.single_space_station.geometry.es_lat_deg,
         )
@@ -875,6 +900,94 @@ class ParametersTest(unittest.TestCase):
             geod_area / 1e6,
             (CL_AREA + BR_AREA) / 1e6,
             delta=53e3)
+
+    def test_mss_d2d_loaded_exclusion_zone(self):
+        """Test loading and geometry checks for MSS D2D exclusion zone parameters."""
+        exclusion_zone = self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone
+        exclusion_zone.type = "CIRCLE"
+        exclusion_zone.circle.center_lat = 0.0
+        exclusion_zone.circle.center_lon = 0.0
+        exclusion_zone.circle.radius_km = 1.0
+
+        # test exclusion zone circle area
+        exclusion_zone._calculate_polygon()
+        pol = exclusion_zone._polygon
+
+        geod = Geod(a=EARTH_RADIUS_M, b=EARTH_RADIUS_M)
+
+        # geod area should be similar to a circle area for small area
+        CIRCLE_AREA = np.pi * 1e6
+        CIRCLE_PERIMETER = 2 * np.pi * 1e3
+        area, perimeter = geod.geometry_area_perimeter(pol)
+        area = abs(area)
+
+        self.assertAlmostEqual(perimeter, CIRCLE_PERIMETER, delta=3)
+        # 0.2 % error:
+        rel_delta = 0.2 / 100
+        self.assertAlmostEqual(area, CIRCLE_AREA, delta=rel_delta * CIRCLE_AREA)
+
+    def test_mss_d2d_loaded_service_grid(self):
+        """
+        Testing if service grid is created according to exclusion zone specification
+        """
+        # test service grid on 2 countries
+        beam_radius_m = 40e3
+        seed = 2
+        self.parameters.mss_d2d.beam_positioning.service_grid.beam_radius = beam_radius_m
+        self.parameters.mss_d2d.beam_positioning.service_grid.grid_margin_from_border = beam_radius_m / 1e3
+        rng = np.random.RandomState(seed)
+
+        self.parameters.mss_d2d.beam_positioning.service_grid.country_names = [
+            "Paraguay", "Brazil"]
+
+        self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone.type = None
+        self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone._calculate_polygon()
+        self.parameters.mss_d2d.beam_positioning.service_grid.reset_grid(
+            "test", rng, True)
+
+        """Test circle with same radius as margin"""
+        original_grid = self.parameters.mss_d2d.beam_positioning.service_grid.lon_lat_grid
+
+        grid_exclusion_zone = self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone
+        grid_exclusion_zone.type = "CIRCLE"
+        # at frienship bridge, so should affect more than 1 grid
+        grid_exclusion_zone.circle.center_lat = -25.5094741
+        grid_exclusion_zone.circle.center_lon = -54.6007197
+        grid_exclusion_zone.circle.radius_km = beam_radius_m / 1e3
+
+        rng = np.random.RandomState(seed)
+        grid_exclusion_zone._calculate_polygon()
+
+        self.parameters.mss_d2d.beam_positioning.service_grid.reset_grid(
+            "test", rng, True)
+        grid_w_exclusion = self.parameters.mss_d2d.beam_positioning.service_grid.lon_lat_grid
+
+        self.assertEqual(original_grid.shape, grid_w_exclusion.shape)
+
+        """Test circle with radius bigger than margin"""
+        original_grid = self.parameters.mss_d2d.beam_positioning.service_grid.lon_lat_grid
+
+        grid_exclusion_zone = self.parameters.mss_d2d.beam_positioning.service_grid.grid_exclusion_zone
+        grid_exclusion_zone.type = "CIRCLE"
+        # at frienship bridge, so should affect more than 1 grid
+        grid_exclusion_zone.circle.center_lat = -25.5094741
+        grid_exclusion_zone.circle.center_lon = -54.6007197
+        grid_exclusion_zone.circle.radius_km = 2 * beam_radius_m / 1e3
+
+        rng = np.random.RandomState(seed)
+        grid_exclusion_zone._calculate_polygon()
+
+        self.parameters.mss_d2d.beam_positioning.service_grid.reset_grid(
+            "test", rng, True)
+        grid_w_exclusion = self.parameters.mss_d2d.beam_positioning.service_grid.lon_lat_grid
+
+        n_original = original_grid.shape[1]
+        n_after = grid_w_exclusion.shape[1]
+
+        # aft >= orig - 6
+        self.assertLessEqual(n_original - 6, n_after)
+        # aft < orig
+        self.assertLess(n_after, n_original)
 
 
 if __name__ == '__main__':

@@ -11,15 +11,17 @@ from sharc.support.observable import Observable
 import numpy as np
 import math
 import sys
+from sharc.support.backend_handler import xp, backend
 import matplotlib.pyplot as plt
 
 from sharc.support.enumerations import StationType
 from sharc.topology.topology_factory import TopologyFactory
-from sharc.support.sharc_geom import GeometryConverter
+from sharc.support.sharc_geom import CoordinateSystem
 from sharc.parameters.parameters import Parameters
 from sharc.station_manager import StationManager
 from sharc.results import Results
 from sharc.propagation.propagation_factory import PropagationFactory
+from sharc.support.sharc_utils import wrap2_180, clip_angle
 
 
 class Simulation(ABC, Observable):
@@ -80,20 +82,20 @@ class Simulation(ABC, Observable):
         self.co_channel = self.parameters.general.enable_cochannel
         self.adjacent_channel = self.parameters.general.enable_adjacent_channel
 
-        geometry_converter = GeometryConverter()
+        coordinate_system = CoordinateSystem()
 
         if self.parameters.imt.topology.central_latitude is not None:
-            geometry_converter.set_reference(
+            coordinate_system.set_reference(
                 self.parameters.imt.topology.central_latitude,
                 self.parameters.imt.topology.central_longitude,
                 self.parameters.imt.topology.central_altitude,
             )
 
-        self.geometry_converter = geometry_converter
+        self.coordinate_system = coordinate_system
 
         self.topology = TopologyFactory.createTopology(
             self.parameters,
-            geometry_converter
+            coordinate_system
         )
 
         self.bs_power_gain = 0
@@ -365,26 +367,26 @@ class Simulation(ABC, Observable):
             path_loss = path_loss[0]
 
         if imt_station.station_type is StationType.IMT_UE:
-            self.imt_system_path_loss = path_loss
+            self.imt_system_path_loss = backend.asarray(path_loss)
         else:
             # Repeat for each BS beam
-            self.imt_system_path_loss = np.repeat(
-                path_loss, self.parameters.imt.ue.k, 1,
+            self.imt_system_path_loss = xp.repeat(
+                backend.asarray(path_loss), self.parameters.imt.ue.k, 1,
             )
 
-        self.system_imt_antenna_gain = gain_sys_to_imt
+        self.system_imt_antenna_gain = backend.asarray(gain_sys_to_imt)
 
         if is_co_channel:
-            self.imt_system_antenna_gain = gain_imt_to_sys
+            self.imt_system_antenna_gain = backend.asarray(gain_imt_to_sys)
         else:
-            self.imt_system_antenna_gain_adjacent = gain_imt_to_sys
+            self.imt_system_antenna_gain_adjacent = backend.asarray(gain_imt_to_sys)
 
         # calculate coupling loss
         coupling_loss = \
-            self.imt_system_path_loss - self.system_imt_antenna_gain - gain_imt_to_sys + additional_loss
+            self.imt_system_path_loss - self.system_imt_antenna_gain - backend.asarray(gain_imt_to_sys) + additional_loss
 
         # Simulator expects imt_stations x system_stations shape
-        return np.transpose(coupling_loss)
+        return xp.transpose(coupling_loss)
 
     def calculate_intra_imt_coupling_loss(
         self,
@@ -438,9 +440,9 @@ class Simulation(ABC, Observable):
         )
 
         # Collect IMT BS and UE antenna gain samples
-        self.path_loss_imt = np.transpose(path_loss)
-        self.imt_bs_antenna_gain = ant_gain_bs_to_ue
-        self.imt_ue_antenna_gain = np.transpose(ant_gain_ue_to_bs)
+        self.path_loss_imt = xp.transpose(backend.asarray(path_loss))
+        self.imt_bs_antenna_gain = backend.asarray(ant_gain_bs_to_ue)
+        self.imt_ue_antenna_gain = xp.transpose(backend.asarray(ant_gain_ue_to_bs))
         additional_loss = self.parameters.imt.bs.ohmic_loss \
             + self.parameters.imt.ue.ohmic_loss \
             + self.parameters.imt.ue.body_loss
@@ -482,6 +484,8 @@ class Simulation(ABC, Observable):
                 self.ue, )
 
         bs_active = np.where(self.bs.active)[0]
+
+        assert np.all((-180 <= self.bs.azimuth) & (self.bs.azimuth <= 180)), "BS azimuth angles should be in [-180, 180] range"
         for bs in bs_active:
             # select K UE's among the ones that are connected to BS
             random_number_gen.shuffle(self.link[bs])
@@ -494,9 +498,14 @@ class Simulation(ABC, Observable):
                     # add beam to BS antennas
 
                     # limit beamforming angle
-                    bs_beam_phi = np.clip(
+                    beam_h_min, beam_h_max = wrap2_180(
+                        self.parameters.imt.bs.antenna.array.horizontal_beamsteering_range + self.bs.azimuth[bs]
+                    )
+
+                    bs_beam_phi = clip_angle(
                         self.bs_to_ue_phi[bs, ue],
-                        *(self.parameters.imt.bs.antenna.array.horizontal_beamsteering_range + self.bs.azimuth[bs])
+                        beam_h_min,
+                        beam_h_max,
                     )
 
                     bs_beam_theta = np.clip(
@@ -585,18 +594,22 @@ class Simulation(ABC, Observable):
 
         # Calculate gains
         gains = np.zeros(phi.shape)
+        
+        phi_cpu = backend.asnumpy(phi)
+        theta_cpu = backend.asnumpy(theta)
+        
         if station_1.station_type is StationType.IMT_BS and not station_2.is_imt_station():
-            off_axis_angle = station_1.get_off_axis_angle(station_2)
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
             for k in station_1_active:
                 for b in range(
                     k * self.parameters.imt.ue.k,
                         (k + 1) * self.parameters.imt.ue.k):
                     gains[b,
-                          station_2_active] = station_1.antenna[k].calculate_gain(phi_vec=phi[b,
-                                                                                              station_2_active],
-                                                                                  theta_vec=theta[b,
-                                                                                                  station_2_active,
-                                                                                                  ],
+                          station_2_active] = station_1.antenna[k].calculate_gain(phi_vec=phi_cpu[b,
+                                                                                               station_2_active],
+                                                                                  theta_vec=theta_cpu[b,
+                                                                                                   station_2_active,
+                                                                                                   ],
                                                                                   beams_l=np.repeat(beams_idx[b],
                                                                                                     len(station_2_active)),
                                                                                   co_channel=c_channel,
@@ -604,12 +617,12 @@ class Simulation(ABC, Observable):
                                                                                                                     station_2_active])
 
         elif station_1.station_type is StationType.IMT_UE and not station_2.is_imt_station():
-            off_axis_angle = station_1.get_off_axis_angle(station_2)
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
             for k in station_1_active:
                 gains[k, station_2_active] = station_1.antenna[k].calculate_gain(
                     off_axis_angle_vec=off_axis_angle[k, station_2_active],
-                    phi_vec=phi[k, station_2_active],
-                    theta_vec=theta[
+                    phi_vec=phi_cpu[k, station_2_active],
+                    theta_vec=theta_cpu[
                         k,
                         station_2_active,
                     ],
@@ -619,28 +632,27 @@ class Simulation(ABC, Observable):
 
         elif station_1.station_type is StationType.RNS:
             gains[0, station_2_active] = station_1.antenna[0].calculate_gain(
-                phi_vec=phi[0, station_2_active],
-                theta_vec=theta[0, station_2_active],
+                phi_vec=phi_cpu[0, station_2_active],
+                theta_vec=theta_cpu[0, station_2_active],
             )
 
         elif not station_1.is_imt_station():
 
-            off_axis_angle = station_1.get_off_axis_angle(station_2)
-            phi, theta = station_1.get_pointing_vector_to(station_2)
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
             for k in station_1_active:
                 gains[k, station_2_active] = \
                     station_1.antenna[k].calculate_gain(
                         off_axis_angle_vec=off_axis_angle[k, station_2_active],
-                        theta_vec=theta[k, station_2_active],
-                        phi_vec=phi[k, station_2_active],
-                )
+                        theta_vec=theta_cpu[k, station_2_active],
+                        phi_vec=phi_cpu[k, station_2_active],
+                )       )
         else:  # for IMT <-> IMT
-            off_axis_angle = station_1.get_off_axis_angle(station_2)
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
             for k in station_1_active:
                 gains[k, station_2_active] = station_1.antenna[k].calculate_gain(
                     off_axis_angle_vec=off_axis_angle[k, station_2_active],
-                    phi_vec=phi[k, station_2_active],
-                    theta_vec=theta[
+                    phi_vec=phi_cpu[k, station_2_active],
+                    theta_vec=theta_cpu[
                         k,
                         station_2_active,
                     ],
@@ -671,10 +683,10 @@ class Simulation(ABC, Observable):
         tput_max = attenuation_factor * \
             math.log2(1 + math.pow(10, 0.1 * sinr_max))
 
-        tput = attenuation_factor * np.log2(1 + np.power(10, 0.1 * sinr))
+        tput = attenuation_factor * xp.log2(1 + xp.power(10, 0.1 * backend.asarray(sinr)))
 
-        id_min = np.where(sinr < sinr_min)[0]
-        id_max = np.where(sinr > sinr_max)[0]
+        id_min = xp.where(backend.asarray(sinr) < sinr_min)[0]
+        id_max = xp.where(backend.asarray(sinr) > sinr_max)[0]
 
         if len(id_min) > 0:
             tput[id_min] = tput_min
@@ -713,9 +725,9 @@ class Simulation(ABC, Observable):
 
         # NOTE: using clip is necessary to prevent
         # floating point error to impact the expected result range [0, 1]
-        overlap = np.clip((
-            np.minimum(ue_max_f, sys_max_f) - np.maximum(ue_min_f, sys_min_f)
-        ) / bw_ue, 0.0, 1.0)
+        overlap = xp.clip((
+            xp.minimum(backend.asarray(ue_max_f), backend.asarray(sys_max_f)) - xp.maximum(backend.asarray(ue_min_f), backend.asarray(sys_min_f))
+        ) / backend.asarray(bw_ue), 0.0, 1.0)
 
         return overlap
 

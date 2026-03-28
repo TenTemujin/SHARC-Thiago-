@@ -1,0 +1,147 @@
+general:
+  seed: 288759
+  num_snapshots: 100
+  overwrite_output: false
+  output_dir: /Users/thiagoferreira/Downloads/SHARC/SHARC/sharc/campaigns/teste
+  output_dir_prefix: output_mss_Macro_Urb_FS_20m_TerOFF_Clutter_oneend
+  system: SINGLE_EARTH_STATION
+  imt_link: DOWNLINK
+  enable_adjacent_channel: false
+  enable_cochannel: true
+imt:
+  minimum_separation_distance_bs_ue: 10.0
+  interfered_with: false
+  frequency: 8000
+  bandwidth: 100.0
+  rb_bandwidth: 0.18
+  spectral_mask: IMT-2020
+  spurious_emissions: -13.0
+  adjacent_antenna_model: ITU-R F.1336
+  guard_band_ratio: 0.0
+  topology:
+    central_latitude: -15.79
+    central_longitude: -47.88
+    central_altitude: 0
+    type: MACROCELL
+    macrocell:
+      intersite_distance: 600
+      wrap_around: true
+      num_clusters: 1
+  bs:
+    load_probability: 0.5
+    conducted_power: 22
+    height: 18
+    noise_figure: 13
+    ohmic_loss: 0
+    antenna:
+      array:
+        normalization: false
+        element_pattern: M2101
+        minimum_array_gain: 0.0
+        horizontal_beamsteering_range:
+        - -60.0
+        - 60.0
+        vertical_beamsteering_range:
+        - -15.0
+        - 15.0
+        downtilt: 6
+        element_max_g: 6.4
+        element_phi_3db: 90
+        element_theta_3db: 65.0
+        n_rows: 8.0
+        n_columns: 16
+        element_horiz_spacing: 0.5
+        element_vert_spacing: 2.1
+        element_am: 30.0
+        element_sla_v: 30.0
+        multiplication_factor: 12
+        subarray:
+          is_enabled: true
+          n_rows: 3
+          element_vert_spacing: 0.7
+          eletrical_downtilt: 3
+  ue:
+    k: 3
+    k_m: 1
+    indoor_percent: 70
+    distribution_type: UNIFORM_IN_CELL
+    tx_power_control: true
+    p_o_pusch: -92.2
+    alpha: 0.8
+    p_cmax: 23.0
+    power_dynamic_range: 56
+    height: 1.5
+    noise_figure: 13
+    ohmic_loss: 0.0
+    body_loss: 4
+    antenna:
+      array:
+        normalization: false
+        element_pattern: FIXED
+        minimum_array_gain: -200
+        element_max_g: -4
+        element_phi_3db: 180
+        element_theta_3db: 360
+        n_rows: 1.0
+        n_columns: 1.0
+        element_am: 25
+        element_sla_v: 25
+        multiplication_factor: 12
+  uplink:
+    attenuation_factor: 0.0
+    sinr_min: -10.0
+    sinr_max: 22
+  downlink:
+    attenuation_factor: 0.6
+    sinr_min: -10.0
+    sinr_max: 30.0
+  channel_model: UMa
+  shadowing: true
+single_earth_station:
+  frequency: 8000
+  bandwidth: 40
+  noise_temperature: 5133
+  adjacent_ch_reception: 'OFF'
+  adjacent_ch_selectivity: 0.0
+  adjacent_ch_emissions: 'OFF'
+  adjacent_ch_leak_ratio: 0.0
+  spectral_mask: ''
+  spurious_emissions: -60.0
+  tx_power_density: -50.0
+  polarization_loss: 0.0
+  channel_model: P452
+  geometry:
+    height: 20
+    location:
+      type: FIXED
+      fixed:
+        x: '{dist}'
+        y: 0.0
+    azimuth:
+      type: POINTING_AT_IMT_CENTER
+    elevation:
+      type: FIXED
+      fixed: 0.0
+  antenna:
+    pattern: ITU-R F.1245_fs
+    gain: 36
+    itu_r_f_1245_fs:
+      gain: 36
+      diameter: 3
+      frequency: 8000
+  param_p452:
+    atmospheric_pressure: 1017
+    air_temperature: 293.15
+    percentage_p: RANDOM
+    N0: 352.58
+    delta_N: 60
+    polarization: horizontal
+    Dct: 101
+    Dcr: 100
+    Hte: 18
+    Hre: 20
+    clutter_loss: true
+    tx_lat: -15
+    rx_lat: -15.1
+    is_terrain: false
+    clutter_type: one_end

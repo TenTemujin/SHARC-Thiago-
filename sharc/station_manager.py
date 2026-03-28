@@ -11,7 +11,11 @@ from sharc.support.enumerations import StationType
 from sharc.station import Station
 from sharc.antenna.antenna import Antenna
 from sharc.mask.spectral_mask import SpectralMask
+from sharc.support.backend_handler import xp, backend
 
+_WGS84_A  = 6378137.0                 # semi-major axis [m]
+_WGS84_F  = 1.0 / 298.257223563
+_WGS84_E2 = _WGS84_F * (2.0 - _WGS84_F)
 
 class StationManager(object):
     """
@@ -25,6 +29,8 @@ class StationManager(object):
         self.x = np.empty(n)  # x coordinate
         self.y = np.empty(n)  # y coordinate
         self.z = np.empty(n)  # z coordinate (includes height above ground)
+        self.latitude = np.zeros(n, dtype=float)  # Latitude of station
+        self.longitude = np.zeros(n, dtype=float)  # Longitude of Base Station
         self.azimuth = np.empty(n)
         self.elevation = np.empty(n)
         self.height = np.empty(n)  # station height above ground
@@ -128,11 +134,11 @@ class StationManager(object):
         np.array
             2D distance matrix between stations.
         """
-        distance = np.empty([self.num_stations, station.num_stations])
+        distance = xp.empty([self.num_stations, station.num_stations])
         for i in range(self.num_stations):
-            distance[i] = np.sqrt(
-                np.power(self.x[i] - station.x, 2) +
-                np.power(self.y[i] - station.y, 2),
+            distance[i] = xp.sqrt(
+                xp.power(self.x[i] - backend.asarray(station.x), 2) +
+                xp.power(self.y[i] - backend.asarray(station.y), 2),
             )
         return distance
 
@@ -149,14 +155,17 @@ class StationManager(object):
         np.array
             3D distance matrix between stations.
         """
-        distance = np.empty([self.num_stations, station.num_stations])
-        for i in range(self.num_stations):
-            distance[i] = np.sqrt(
-                np.power(self.x[i] - station.x, 2) +
-                np.power(self.y[i] - station.y, 2) +
-                np.power(self.z[i] - station.z, 2)
-            )
-        return distance
+        dx = xp.subtract.outer(backend.asarray(self.x), backend.asarray(station.x)).astype(xp.float64)
+        dy = xp.subtract.outer(backend.asarray(self.y), backend.asarray(station.y)).astype(xp.float64)
+        dz = xp.subtract.outer(backend.asarray(self.z), backend.asarray(station.z)).astype(xp.float64)
+        xp.square(dx, out=dx)
+        xp.square(dy, out=dy)
+        xp.square(dz, out=dz)
+        xp.sqrt(
+            dx + dy + dz,
+            out=dx
+        )
+        return dx
 
     def get_dist_angles_wrap_around(self, station) -> np.array:
         """Calculate distances and angles using the wrap-around technique.
@@ -175,68 +184,71 @@ class StationManager(object):
             theta (np.array): elevation of pointing vector to other stations
         """
         # Initialize variables
-        distance_3D = np.empty([self.num_stations, station.num_stations])
-        distance_2D = np.inf * np.ones_like(distance_3D)
-        cluster_num = np.zeros_like(distance_3D, dtype=int)
+        distance_3D = xp.empty([self.num_stations, station.num_stations])
+        distance_2D = xp.inf * xp.ones_like(distance_3D)
+        cluster_num = xp.zeros_like(distance_3D, dtype=int)
 
         # Cluster coordinates
-        cluster_x = np.array([
-            station.x,
-            station.x + 3.5 * self.intersite_dist,
-            station.x - 0.5 * self.intersite_dist,
-            station.x - 4.0 * self.intersite_dist,
-            station.x - 3.5 * self.intersite_dist,
-            station.x + 0.5 * self.intersite_dist,
-            station.x + 4.0 * self.intersite_dist,
+        sx = backend.asarray(station.x)
+        sy = backend.asarray(station.y)
+        sh = backend.asarray(station.height)
+        nx = backend.asarray(self.x)
+        ny = backend.asarray(self.y)
+        nh = backend.asarray(self.height)
+        dist_int = backend.asarray(self.intersite_dist)
+
+        cluster_x = xp.array([
+            sx,
+            sx + 3.5 * dist_int,
+            sx - 0.5 * dist_int,
+            sx - 4.0 * dist_int,
+            sx - 3.5 * dist_int,
+            sx + 0.5 * dist_int,
+            sx + 4.0 * dist_int,
         ])
 
-        cluster_y = np.array([
-            station.y,
-            station.y + 1.5 *
-            np.sqrt(3.0) * self.intersite_dist,
-            station.y + 2.5 *
-            np.sqrt(3.0) * self.intersite_dist,
-            station.y + 1.0 *
-            np.sqrt(3.0) * self.intersite_dist,
-            station.y - 1.5 *
-            np.sqrt(3.0) * self.intersite_dist,
-            station.y - 2.5 *
-            np.sqrt(3.0) * self.intersite_dist,
-            station.y - 1.0 * np.sqrt(3.0) * self.intersite_dist,
+        cluster_y = xp.array([
+            sy,
+            sy + 1.5 * xp.sqrt(3.0) * dist_int,
+            sy + 2.5 * xp.sqrt(3.0) * dist_int,
+            sy + 1.0 * xp.sqrt(3.0) * dist_int,
+            sy - 1.5 * xp.sqrt(3.0) * dist_int,
+            sy - 2.5 * xp.sqrt(3.0) * dist_int,
+            sy - 1.0 * xp.sqrt(3.0) * dist_int,
         ])
 
         # Calculate 2D distance
-        temp_distance = np.zeros_like(distance_2D)
+        temp_distance = xp.zeros_like(distance_2D)
         for k, (x, y) in enumerate(zip(cluster_x, cluster_y)):
-            temp_distance = np.sqrt(
-                np.power(x - self.x[:, np.newaxis], 2) +
-                np.power(y - self.y[:, np.newaxis], 2),
+            temp_distance = xp.sqrt(
+                xp.power(x - nx[:, xp.newaxis], 2) +
+                xp.power(y - ny[:, xp.newaxis], 2),
             )
             is_shorter = temp_distance < distance_2D
             distance_2D[is_shorter] = temp_distance[is_shorter]
             cluster_num[is_shorter] = k
 
         # Calculate 3D distance
-        distance_3D = np.sqrt(
-            np.power(distance_2D, 2) +
-            np.power(station.height - self.height[:, np.newaxis], 2),
+        distance_3D = xp.sqrt(
+            xp.power(distance_2D, 2) +
+            xp.power(sh - nh[:, xp.newaxis], 2),
         )
 
         # Calcualte pointing vector
-        point_vec_x = cluster_x[cluster_num, np.arange(station.num_stations)] \
-            - self.x[:, np.newaxis]
-        point_vec_y = cluster_y[cluster_num, np.arange(station.num_stations)] \
-            - self.y[:, np.newaxis]
-        point_vec_z = station.height - self.height[:, np.newaxis]
+        point_vec_x = cluster_x[cluster_num, xp.arange(station.num_stations)] \
+            - nx[:, xp.newaxis]
+        point_vec_y = cluster_y[cluster_num, xp.arange(station.num_stations)] \
+            - ny[:, xp.newaxis]
+        point_vec_z = sh - nh[:, xp.newaxis]
 
-        phi = np.array(
-            np.rad2deg(
-                np.arctan2(
+        phi = xp.array(
+            xp.rad2deg(
+                xp.arctan2(
                     point_vec_y, point_vec_x,
                 ),
             ), ndmin=2,
         )
-        theta = np.rad2deg(np.arccos(point_vec_z / distance_3D))
+        theta = xp.rad2deg(xp.arccos(point_vec_z / distance_3D))
 
         return distance_2D, distance_3D, phi, theta
 
@@ -259,15 +271,19 @@ class StationManager(object):
         despite the different matrix dimensions. The methods should be merged to reuse code.
         """
 
-        elevation = np.empty([self.num_stations, station.num_stations])
+        elevation = xp.empty([self.num_stations, station.num_stations])
+        
+        sx = backend.asarray(station.x)
+        sy = backend.asarray(station.y)
+        sz = backend.asarray(station.z)
 
         for i in range(self.num_stations):
-            distance = np.sqrt(
-                np.power(self.x[i] - station.x, 2) +
-                np.power(self.y[i] - station.y, 2),
+            distance = xp.sqrt(
+                xp.power(backend.asarray(self.x[i]) - sx, 2) +
+                xp.power(backend.asarray(self.y[i]) - sy, 2),
             )
-            rel_z = station.z - self.z[i]
-            elevation[i] = np.degrees(np.arctan2(rel_z, distance))
+            rel_z = sz - backend.asarray(self.z[i])
+            elevation[i] = xp.degrees(xp.arctan2(rel_z, distance))
 
         return elevation
 
@@ -285,21 +301,62 @@ class StationManager(object):
             phi, theta (phi is calculated with respect to x counter-clockwise and
             theta is calculated with respect to z counter-clockwise).
         """
+        if (self.latitude[0] != 0):
+            # 3) LOS in ECEF, broadcast to (N,M,3)
+            bx = backend.asarray(self.x)
+            by = backend.asarray(self.y)
+            bz = backend.asarray(self.z)
+            sx = backend.asarray(station.x)
+            sy = backend.asarray(station.y)
+            sz = backend.asarray(station.z)
 
-        point_vec_x = station.x - self.x[:, np.newaxis]
-        point_vec_y = station.y - self.y[:, np.newaxis]
-        point_vec_z = station.z - self.z[:, np.newaxis]
+            dx = -(bx[None, :] - sx[:, None])
+            dy = -(by[None, :] - sy[:, None])
+            dz = -(bz[None, :] - sz[:, None])
+            v_ecef = xp.stack([dx, dy, dz], axis=-1)             # (N,M,3)
+            dist   = xp.linalg.norm(v_ecef, axis=-1)
+            dist_safe = xp.where(dist == 0.0, 1.0, dist)
 
-        dist = self.get_3d_distance_to(station)
+            # 4) Rotation ECEF->ENU at each BS
+            R = backend.asarray(_rot_ecef_to_enu(self.latitude, self.longitude))               # (N,3,3)
 
-        phi = np.array(
-            np.rad2deg(
-                np.arctan2(
-                    point_vec_y, point_vec_x,
-                ),
-            ), ndmin=2,
-        )
-        theta = np.rad2deg(np.arccos(point_vec_z / dist))
+            # 5) Rotate LOS into ENU of each BS
+            v_ecef = xp.swapaxes(v_ecef, 0, 1)
+            dist_safe = xp.swapaxes(dist_safe, 0, 1)
+            v_enu = xp.einsum('nij,nmj->nmi', R, v_ecef)         # (N,M,3) comp = [E,N,U]
+            E = v_enu[..., 0]
+            N = v_enu[..., 1]
+            U = v_enu[..., 2]
+
+            # 6) Angles
+            phi = xp.degrees(xp.arctan2(N, E))                   # [-180,180]
+            cos_th = xp.clip(U / dist_safe, -1.0, 1.0)
+            theta  = xp.degrees(xp.arccos(cos_th))               # [0,180], 0=along Up
+        else:
+            bx = backend.asarray(self.x)
+            by = backend.asarray(self.y)
+            bz = backend.asarray(self.z)
+            sx = backend.asarray(station.x)
+            sy = backend.asarray(station.y)
+            sz = backend.asarray(station.z)
+
+            # malloc
+            dx = (sx - bx[:, xp.newaxis]).astype(xp.float64)
+            dy = (sy - by[:, xp.newaxis]).astype(xp.float64)
+            dz = (sz - bz[:, xp.newaxis]).astype(xp.float64)
+
+            dist = self.get_3d_distance_to(station)
+
+            # NOTE: doing in place calculations
+            phi = xp.rad2deg(xp.arctan2(dy, dx, out=dx), out=dx)
+            
+            # delete reference dx
+            del dx
+
+            # in place calculations
+            theta = xp.rad2deg(xp.arccos(xp.clip(dz / dist, -1.0, 1.0, out=dz), out=dz), out=dz)
+            # delete reference dz
+            del dz
 
         return phi, theta
 
@@ -317,19 +374,19 @@ class StationManager(object):
             Off-axis angle matrix (degrees).
         """
         Az, b = self.get_pointing_vector_to(station)
-        Az0 = self.azimuth
+        Az0 = backend.asarray(self.azimuth)
 
-        a = 90 - self.elevation[:, np.newaxis]
-        C = Az0[:, np.newaxis] - Az
+        a = 90 - backend.asarray(self.elevation)[:, xp.newaxis]
+        C = Az0[:, xp.newaxis] - Az
 
-        cos_phi = np.cos(np.radians(a)) * np.cos(np.radians(b)) \
-            + np.sin(np.radians(a)) * np.sin(np.radians(b)) * np.cos(np.radians(C))
-        phi = np.arccos(
+        cos_phi = xp.cos(xp.radians(a)) * xp.cos(xp.radians(b)) \
+            + xp.sin(xp.radians(a)) * xp.sin(xp.radians(b)) * xp.cos(xp.radians(C))
+        phi = xp.arccos(
             # imprecision may accumulate enough for numbers to be slightly out
             # of arccos range
-            np.clip(cos_phi, -1., 1.)
+            xp.clip(cos_phi, -1., 1.)
         )
-        phi_deg = np.degrees(phi)
+        phi_deg = xp.degrees(phi)
 
         return phi_deg
 
@@ -346,6 +403,49 @@ class StationManager(object):
         else:
             return False
 
+def _lla_to_ecef(lat_deg, lon_deg, h_m):
+    """Vectorized geodetic (deg,deg,m) -> ECEF XYZ (m) on WGS-84."""
+    lat = np.radians(np.asarray(lat_deg, dtype=float))
+    lon = np.radians(np.asarray(lon_deg, dtype=float))
+    h   = np.asarray(h_m, dtype=float)
+
+    sl, cl = np.sin(lat), np.cos(lat)
+    sb, cb = np.sin(lon), np.cos(lon)
+
+    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sl * sl)
+    X = (N + h) * cl * cb
+    Y = (N + h) * cl * sb
+    Z = (N * (1.0 - _WGS84_E2) + h) * sl
+    return X, Y, Z
+
+
+def _rot_ecef_to_enu(lat_deg, lon_deg):
+    """
+    Vectorized rotation matrices R (N,3,3) that map v_ecef -> [E,N,U] at each (lat,lon).
+    Rows are the ENU basis vectors.
+    """
+    lat = np.radians(np.asarray(lat_deg, dtype=float))
+    lon = np.radians(np.asarray(lon_deg, dtype=float))
+    sl, cl = np.sin(lat), np.cos(lat)
+    sb, cb = np.sin(lon), np.cos(lon)
+
+    # Each R has rows [east; north; up]
+    # east  = [-sin(lon),  cos(lon), 0]
+    # north = [-sin(lat)cos(lon), -sin(lat)sin(lon), cos(lat)]
+    # up    = [ cos(lat)cos(lon),  cos(lat)sin(lon), sin(lat)]
+    R = np.empty((lat.shape[0], 3, 3), dtype=float)
+    R[:, 0, 0] = -sb
+    R[:, 0, 1] =  cb
+    R[:, 0, 2] =  0.0
+
+    R[:, 1, 0] = -sl * cb
+    R[:, 1, 1] = -sl * sb
+    R[:, 1, 2] =  cl
+
+    R[:, 2, 0] =  cl * cb
+    R[:, 2, 1] =  cl * sb
+    R[:, 2, 2] =  sl
+    return R
 
 def copy_active_stations(stations: StationManager) -> StationManager:
     """Return a new StationManager object containing only the active stations.
