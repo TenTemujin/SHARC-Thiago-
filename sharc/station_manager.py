@@ -134,13 +134,12 @@ class StationManager(object):
         np.array
             2D distance matrix between stations.
         """
-        distance = xp.empty([self.num_stations, station.num_stations])
-        for i in range(self.num_stations):
-            distance[i] = xp.sqrt(
-                xp.power(self.x[i] - backend.asarray(station.x), 2) +
-                xp.power(self.y[i] - backend.asarray(station.y), 2),
-            )
-        return distance
+        dx = xp.subtract.outer(backend.asarray(self.x), backend.asarray(station.x)).astype(xp.float64)
+        dy = xp.subtract.outer(backend.asarray(self.y), backend.asarray(station.y)).astype(xp.float64)
+        xp.square(dx, out=dx)
+        xp.square(dy, out=dy)
+        xp.sqrt(dx + dy, out=dx)
+        return dx
 
     def get_3d_distance_to(self, station) -> np.array:
         """Calculate the 3D distance between this manager's stations and another's.
@@ -270,22 +269,13 @@ class StationManager(object):
         This implementation is essentially the same as get_elevation_angle (free-space elevation angle),
         despite the different matrix dimensions. The methods should be merged to reuse code.
         """
-
-        elevation = xp.empty([self.num_stations, station.num_stations])
         
-        sx = backend.asarray(station.x)
-        sy = backend.asarray(station.y)
+        distance = self.get_distance_to(station)
         sz = backend.asarray(station.z)
-
-        for i in range(self.num_stations):
-            distance = xp.sqrt(
-                xp.power(backend.asarray(self.x[i]) - sx, 2) +
-                xp.power(backend.asarray(self.y[i]) - sy, 2),
-            )
-            rel_z = sz - backend.asarray(self.z[i])
-            elevation[i] = xp.degrees(xp.arctan2(rel_z, distance))
-
-        return elevation
+        mz = backend.asarray(self.z)
+        rel_z = sz - mz[:, xp.newaxis]
+        
+        return xp.degrees(xp.arctan2(rel_z, distance))
 
     def get_pointing_vector_to(self, station) -> tuple:
         """Calculate the pointing vector (angles) with respect to another station.
@@ -405,14 +395,15 @@ class StationManager(object):
 
 def _lla_to_ecef(lat_deg, lon_deg, h_m):
     """Vectorized geodetic (deg,deg,m) -> ECEF XYZ (m) on WGS-84."""
-    lat = np.radians(np.asarray(lat_deg, dtype=float))
-    lon = np.radians(np.asarray(lon_deg, dtype=float))
-    h   = np.asarray(h_m, dtype=float)
+    from sharc.support.backend_handler import xp, backend
+    lat = xp.radians(backend.asarray(lat_deg, dtype=float))
+    lon = xp.radians(backend.asarray(lon_deg, dtype=float))
+    h   = backend.asarray(h_m, dtype=float)
 
-    sl, cl = np.sin(lat), np.cos(lat)
-    sb, cb = np.sin(lon), np.cos(lon)
+    sl, cl = xp.sin(lat), xp.cos(lat)
+    sb, cb = xp.sin(lon), xp.cos(lon)
 
-    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sl * sl)
+    N = _WGS84_A / xp.sqrt(1.0 - _WGS84_E2 * sl * sl)
     X = (N + h) * cl * cb
     Y = (N + h) * cl * sb
     Z = (N * (1.0 - _WGS84_E2) + h) * sl
@@ -424,16 +415,17 @@ def _rot_ecef_to_enu(lat_deg, lon_deg):
     Vectorized rotation matrices R (N,3,3) that map v_ecef -> [E,N,U] at each (lat,lon).
     Rows are the ENU basis vectors.
     """
-    lat = np.radians(np.asarray(lat_deg, dtype=float))
-    lon = np.radians(np.asarray(lon_deg, dtype=float))
-    sl, cl = np.sin(lat), np.cos(lat)
-    sb, cb = np.sin(lon), np.cos(lon)
+    from sharc.support.backend_handler import xp, backend
+    lat = xp.radians(backend.asarray(lat_deg, dtype=float))
+    lon = xp.radians(backend.asarray(lon_deg, dtype=float))
+    sl, cl = xp.sin(lat), xp.cos(lat)
+    sb, cb = xp.sin(lon), xp.cos(lon)
 
     # Each R has rows [east; north; up]
     # east  = [-sin(lon),  cos(lon), 0]
     # north = [-sin(lat)cos(lon), -sin(lat)sin(lon), cos(lat)]
     # up    = [ cos(lat)cos(lon),  cos(lat)sin(lon), sin(lat)]
-    R = np.empty((lat.shape[0], 3, 3), dtype=float)
+    R = xp.empty((lat.shape[0], 3, 3), dtype=float)
     R[:, 0, 0] = -sb
     R[:, 0, 1] =  cb
     R[:, 0, 2] =  0.0

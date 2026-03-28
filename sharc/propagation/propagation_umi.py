@@ -7,6 +7,15 @@ Created on Mon Jul  3 10:29:47 2017
 import numpy as np
 from multipledispatch import dispatch
 
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
+
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -28,7 +37,7 @@ class PropagationUMi(Propagation):
         self.los_adjustment_factor = los_adjustment_factor
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -85,7 +94,7 @@ class PropagationUMi(Propagation):
 
     # pylint: disable=function-redefined
     # pylint: disable=arguments-renamed
-    @dispatch(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool)
+    @dispatch(_ArrayType, _ArrayType, _ArrayType, _ArrayType, _ArrayType, bool)
     def get_loss(
         self,
         distance_3D: np.array,

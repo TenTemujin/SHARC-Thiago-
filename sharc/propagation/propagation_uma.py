@@ -10,6 +10,15 @@ import matplotlib.pyplot as plt
 from cycler import cycler
 from multipledispatch import dispatch
 
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
+
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -22,7 +31,7 @@ class PropagationUMa(Propagation):
     TODO: calculate the effective environment height for the generic case
     """
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -79,7 +88,7 @@ class PropagationUMa(Propagation):
         # array
         return loss
 
-    @dispatch(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool)
+    @dispatch(_ArrayType, _ArrayType, _ArrayType, _ArrayType, _ArrayType, bool)
     def get_loss(
         self,
         distance_3d: np.array,

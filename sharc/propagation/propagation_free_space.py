@@ -7,6 +7,15 @@ Created on Thu Feb 16 12:04:27 2017
 import numpy as np
 from multipledispatch import dispatch
 
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
+
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -20,7 +29,7 @@ class PropagationFreeSpace(Propagation):
     """
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -53,7 +62,7 @@ class PropagationFreeSpace(Propagation):
 
         return loss
 
-    @dispatch(np.ndarray, np.ndarray)
+    @dispatch(_ArrayType, _ArrayType)
     def get_loss(self, distance_3D: np.array, frequency: float) -> np.array:
         """Calculate the free-space loss for the given 3D distance and frequency.
 

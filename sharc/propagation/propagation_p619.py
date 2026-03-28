@@ -11,6 +11,15 @@ import csv
 from scipy.interpolate import interp1d
 import numpy as np
 from multipledispatch import dispatch
+
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
 from warnings import warn
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -311,7 +320,7 @@ class PropagationP619(Propagation):
         return elevation_deg + tau_fs_deg
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -419,7 +428,7 @@ class PropagationP619(Propagation):
 
         return loss
 
-    @dispatch(np.ndarray, np.ndarray, np.ndarray, dict, bool, np.ndarray, bool, np.ndarray)
+    @dispatch(_ArrayType, _ArrayType, _ArrayType, dict, bool, _ArrayType, bool, _ArrayType)
     def get_loss(
         self,
         distance: np.array,

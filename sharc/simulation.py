@@ -645,7 +645,7 @@ class Simulation(ABC, Observable):
                         off_axis_angle_vec=off_axis_angle[k, station_2_active],
                         theta_vec=theta_cpu[k, station_2_active],
                         phi_vec=phi_cpu[k, station_2_active],
-                )       )
+                )
         else:  # for IMT <-> IMT
             off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
             for k in station_1_active:

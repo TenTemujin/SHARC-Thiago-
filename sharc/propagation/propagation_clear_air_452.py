@@ -4,6 +4,14 @@
 import numpy as np
 from multipledispatch import dispatch
 
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -1509,7 +1517,7 @@ class PropagationClearAir(Propagation):
         return Ldp, Ld50
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -1569,8 +1577,8 @@ class PropagationClearAir(Propagation):
         )
 
     # pylint: disable=arguments-differ
-    @dispatch(np.ndarray, np.ndarray, np.ndarray,
-              np.ndarray, np.ndarray, np.ndarray)
+    @dispatch(_ArrayType, _ArrayType, _ArrayType,
+              _ArrayType, _ArrayType, _ArrayType)
     def get_loss(
         self, distance: np.ndarray, frequency: np.ndarray,
         indoor_stations: np.ndarray, elevation: np.ndarray,
@@ -1598,6 +1606,20 @@ class PropagationClearAir(Propagation):
         np.array
             array of losses
         """
+        is_cupy = False
+        try:
+            import cupy as cp
+            if isinstance(distance, cp.ndarray):
+                is_cupy = True
+                distance = distance.get()
+                frequency = frequency.get() if isinstance(frequency, cp.ndarray) else frequency
+                indoor_stations = indoor_stations.get() if isinstance(indoor_stations, cp.ndarray) else indoor_stations
+                elevation = elevation.get() if isinstance(elevation, cp.ndarray) else elevation
+                tx_gain = tx_gain.get() if isinstance(tx_gain, cp.ndarray) else tx_gain
+                rx_gain = rx_gain.get() if isinstance(rx_gain, cp.ndarray) else rx_gain
+        except ImportError:
+            pass
+
         frequency = np.unique(frequency)
         if len(frequency) > 1:
             error_message = "different frequencies not supported in P.452"
@@ -1921,5 +1943,12 @@ class PropagationClearAir(Propagation):
         )
         building_loss = b_loss * indoor_stations
         lb_new = Lb + clutter_loss + building_loss
+
+        if is_cupy:
+            try:
+                import cupy as cp
+                lb_new = cp.asarray(lb_new)
+            except ImportError:
+                pass
 
         return lb_new

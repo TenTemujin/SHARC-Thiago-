@@ -7,6 +7,15 @@ Created on Wed Aug 16 13:42:19 2017
 import numpy as np
 from multipledispatch import dispatch
 
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
+
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -30,7 +39,7 @@ class PropagationTerSimple(Propagation):
         self.building_loss = 20
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -73,7 +82,7 @@ class PropagationTerSimple(Propagation):
         return self.get_loss(distance, frequency_array, indoor_stations, -1.0)
 
     # pylint: disable=arguments-differ
-    @dispatch(np.ndarray, np.ndarray, np.ndarray, float)
+    @dispatch(_ArrayType, _ArrayType, _ArrayType, float)
     def get_loss(
         self,
         distance: np.ndarray,

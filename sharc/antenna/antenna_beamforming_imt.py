@@ -119,9 +119,9 @@ class AntennaBeamformingImt(Antenna):
         """
         phi, theta = self.to_local_coord(phi_etilt, theta_etilt)
         self.beams_list.append(
-            (np.ndarray.item(phi), np.ndarray.item(theta - 90)),
+            (phi.item(), (theta - 90).item()),
         )
-        self.w_vec_list.append(self._weight_vector(phi, theta - 90))
+        self.w_vec_list.append(self._weight_vector(phi.item(), (theta - 90).item()))
 
         if self.normalize:
             lin = int(phi / self.resolution)
@@ -153,8 +153,13 @@ class AntennaBeamformingImt(Antenna):
         -------
         gains (np.array): gain corresponding to each of the given directions.
         """
-        phi_vec = np.asarray(kwargs["phi_vec"])
-        theta_vec = np.asarray(kwargs["theta_vec"])
+        import sys
+        if 'cupy' in sys.modules and type(kwargs.get("phi_vec")).__module__.startswith('cupy'):
+            import cupy as xp
+        else:
+            xp = np
+        phi_vec = xp.asarray(kwargs["phi_vec"])
+        theta_vec = xp.asarray(kwargs["theta_vec"])
 
         # Check if antenna gain has to be calculated on the co-channel or
         # on the adjacent channel
@@ -202,20 +207,20 @@ class AntennaBeamformingImt(Antenna):
 
         n_direct = len(lo_theta_vec)
 
-        gains = np.zeros(n_direct)
+        gains = xp.zeros(n_direct)
 
         if co_channel:
             for g in range(n_direct):
                 gains[g] = self._beam_gain(
-                    lo_phi_vec[g], lo_theta_vec[g],
-                    beams_l[g],
+                    float(lo_phi_vec[g]), float(lo_theta_vec[g]),
+                    int(beams_l[g]),
                 )\
-                    + correction_factor[correction_factor_idx[g]]
+                    + float(correction_factor[int(correction_factor_idx[g])])
         else:
             for g in range(n_direct):
                 elem_g = self.element.element_pattern(
-                    lo_phi_vec[g],
-                    lo_theta_vec[g],
+                    float(lo_phi_vec[g]),
+                    float(lo_theta_vec[g]),
                 )
 
                 gains[g] = elem_g \
@@ -345,28 +350,44 @@ class AntennaBeamformingImt(Antenna):
         tuple
             phi, theta in the antenna's coordinate system
         """
+        import sys
+        if 'cupy' in sys.modules and type(phi).__module__.startswith('cupy'):
+            import cupy as xp
+        else:
+            xp = np
 
-        phi_rad = np.ravel(np.array([np.deg2rad(phi)]))
-        theta_rad = np.ravel(np.array([np.deg2rad(theta)]))
+        phi_rad = xp.deg2rad(phi)
+        theta_rad = xp.deg2rad(theta)
 
-        points = np.matrix([
-            np.sin(theta_rad) * np.cos(phi_rad),
-            np.sin(theta_rad) * np.sin(phi_rad),
-            np.cos(theta_rad),
+        if xp.isscalar(phi_rad):
+            phi_rad = xp.array([phi_rad])
+        else:
+            phi_rad = phi_rad.ravel()
+
+        if xp.isscalar(theta_rad):
+            theta_rad = xp.array([theta_rad])
+        else:
+            theta_rad = theta_rad.ravel()
+
+        points = xp.array([
+            xp.sin(theta_rad) * xp.cos(phi_rad),
+            xp.sin(theta_rad) * xp.sin(phi_rad),
+            xp.cos(theta_rad),
         ])
 
-        rotated_points = self.rotation_mtx * points
+        rot_mtx = xp.asarray(self.rotation_mtx)
+        rotated_points = xp.dot(rot_mtx, points)
 
-        lo_phi = np.ravel(
-            np.asarray(
-                np.rad2deg(
-                    np.arctan2(rotated_points[1], rotated_points[0]),
+        lo_phi = xp.ravel(
+            xp.asarray(
+                xp.rad2deg(
+                    xp.arctan2(rotated_points[1], rotated_points[0]),
                 ),
             ),
         )
-        lo_theta = np.ravel(
-            np.asarray(
-                np.rad2deg(np.arccos(rotated_points[2])),
+        lo_theta = xp.ravel(
+            xp.asarray(
+                xp.rad2deg(xp.arccos(rotated_points[2])),
             ),
         )
 
@@ -377,17 +398,17 @@ class AntennaBeamformingImt(Antenna):
         alpha = np.deg2rad(self.azimuth)
         beta = np.deg2rad(self.elevation)
 
-        ry = np.matrix([
+        ry = np.array([
             [np.cos(beta), 0.0, np.sin(beta)],
             [0.0, 1.0, 0.0],
             [-np.sin(beta), 0.0, np.cos(beta)],
         ])
-        rz = np.matrix([
+        rz = np.array([
             [np.cos(alpha), -np.sin(alpha), 0.0],
             [np.sin(alpha), np.cos(alpha), 0.0],
             [0.0, 0.0, 1.0],
         ])
-        self.rotation_mtx = ry * np.transpose(rz)
+        self.rotation_mtx = np.dot(ry, rz.T)
 
 ###############################################################################
 

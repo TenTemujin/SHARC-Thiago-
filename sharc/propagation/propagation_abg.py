@@ -8,6 +8,15 @@ Created on Tue Jul  4 11:57:41 2017
 import numpy as np
 from multipledispatch import dispatch
 
+import sys
+import numpy as _np
+try:
+    import cupy as _cp
+    _ArrayType = (_np.ndarray, _cp.ndarray)
+except ImportError:
+    _ArrayType = (_np.ndarray,)
+
+
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -36,7 +45,7 @@ class PropagationABG(Propagation):
         self.shadowing_sigma_dB = 6.5
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, np.ndarray, np.ndarray)
+              StationManager, _ArrayType, _ArrayType)
     def get_loss(
         self,
         params: Parameters,
@@ -90,7 +99,7 @@ class PropagationABG(Propagation):
 
         return loss
 
-    @dispatch(np.ndarray, np.ndarray, np.ndarray, bool)
+    @dispatch(_ArrayType, _ArrayType, _ArrayType, bool)
     def get_loss(
             self,
             distance: np.array,

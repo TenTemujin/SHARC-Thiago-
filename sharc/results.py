@@ -11,6 +11,7 @@ import datetime
 import re
 import pathlib
 import pandas as pd
+import threading
 from shutil import copy
 from sharc.support.sharc_logger import SimulationLogger
 
@@ -106,6 +107,26 @@ class Results(object):
         self.system_rx_interf = SampleList()
 
         self.__sharc_dir = pathlib.Path(__file__).parent.resolve()
+        
+        self._write_thread = None
+
+    def _write_worker(self, data_to_write, overwrite_flags, output_dir):
+        from sharc.support.backend_handler import backend
+        # Process the stored samples on the background to prevent GPU starvation
+        for attr_name, samples in data_to_write.items():
+            file_path = os.path.join(
+                output_dir,
+                attr_name + ".csv",
+            )
+            
+            # Transfer GPU objects back to CPU RAM so pandas can process them
+            safe_samples = [backend.asnumpy(s) for s in samples]
+            
+            df = pd.DataFrame({"samples": safe_samples})
+            if overwrite_flags[attr_name]:
+                df.to_csv(file_path, mode="w", index=False)
+            else:
+                df.to_csv(file_path, mode="a", index=False, header=False)
 
     def prepare_to_write(
         self,
@@ -201,30 +222,31 @@ class Results(object):
         snapshot_number : int
             Current snapshot number
         """
-        from sharc.support.backend_handler import backend
-        
+        if self._write_thread is not None:
+            self._write_thread.join()
+
         results_relevant_attr_names = self.get_relevant_attributes()
+        data_to_write = {}
+        overwrite_flags = {}
+
         for attr_name in results_relevant_attr_names:
-            file_path = os.path.join(
-                self.output_directory,
-                attr_name + ".csv",
-            )
             samples = getattr(self, attr_name)
             if len(samples) == 0:
                 continue
             
-            # Transfer GPU objects back to CPU RAM so pandas can process them
-            safe_samples = [backend.asnumpy(s) for s in samples]
-            
-            df = pd.DataFrame({"samples": safe_samples})
-            if self.overwrite_sample_files:
-                df.to_csv(file_path, mode="w", index=False)
-            else:
-                df.to_csv(file_path, mode="a", index=False, header=False)
+            data_to_write[attr_name] = samples
+            overwrite_flags[attr_name] = self.overwrite_sample_files
             setattr(self, attr_name, SampleList())
 
         if self.overwrite_sample_files:
             self.overwrite_sample_files = False
+            
+        if data_to_write:
+            self._write_thread = threading.Thread(
+                target=self._write_worker,
+                args=(data_to_write, overwrite_flags, self.output_directory)
+            )
+            self._write_thread.start()
 
     @staticmethod
     def load_many_from_dir(
