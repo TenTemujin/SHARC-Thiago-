@@ -97,6 +97,7 @@ class PropagationFreeSpace(Propagation):
         np.array
             returns the path loss array with shape distance.shape
         """
-        loss = 20 * np.log10(distance) + 20 * np.log10(frequency) - 27.55
+        from sharc.support.backend_handler import xp
+        loss = 20 * xp.log10(distance) + 20 * xp.log10(xp.asarray(frequency)) - 27.55
 
         return loss

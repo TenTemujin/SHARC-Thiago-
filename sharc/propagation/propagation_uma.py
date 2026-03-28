@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from cycler import cycler
 from multipledispatch import dispatch
+from sharc.support.backend_handler import xp, backend
 
 import sys
 import numpy as _np
@@ -78,7 +79,7 @@ class PropagationUMa(Propagation):
         loss = self.get_loss(
             distances_3d,
             distances_2d,
-            frequency * np.ones(distances_2d.shape),
+            frequency * xp.ones(distances_2d.shape),
             station_b.height,
             station_a.height,
             params.imt.shadowing,
@@ -116,7 +117,8 @@ class PropagationUMa(Propagation):
             array with path loss values with dimensions of distance_2D
 
         """
-        h_e = np.ones(distance_2d.shape)
+        d2d = backend.asnumpy(distance_2d) if hasattr(distance_2d, 'get') else np.asarray(distance_2d)
+        h_e = np.ones(d2d.shape)
         if shadowing:
             shadowing_los = 4
             shadowing_nlos = 6
@@ -124,13 +126,13 @@ class PropagationUMa(Propagation):
             shadowing_los = 0
             shadowing_nlos = 0
 
-        los_probability = self.get_los_probability(distance_2d, ue_height)
+        los_probability = self.get_los_probability(d2d, np.asarray(ue_height))
         los_condition = self.get_los_condition(los_probability)
 
         i_los = np.where(los_condition)[:2]
         i_nlos = np.where(los_condition == False)[:2]
 
-        loss = np.empty(distance_2d.shape)
+        loss = xp.empty(distance_2d.shape)
 
         if len(i_los[0]):
             loss_los = self.get_loss_los(
@@ -139,7 +141,7 @@ class PropagationUMa(Propagation):
                 frequency,
                 bs_height,
                 ue_height,
-                h_e,
+                backend.asarray(h_e),
                 shadowing_los,
             )
             loss[i_los] = loss_los[i_los]
@@ -151,7 +153,7 @@ class PropagationUMa(Propagation):
                 frequency,
                 bs_height,
                 ue_height,
-                h_e,
+                backend.asarray(h_e),
                 shadowing_nlos,
             )
             loss[i_nlos] = loss_nlos[i_nlos]
@@ -181,31 +183,28 @@ class PropagationUMa(Propagation):
             frequency, h_bs, h_ue, h_e,
         )
 
-        # get index where distance if less than breakpoint
-        idl = np.where(distance_2D < breakpoint_distance)
+        idl = xp.where(distance_2D < breakpoint_distance)
+        idg = xp.where(distance_2D >= breakpoint_distance)
 
-        # get index where distance if greater than breakpoint
-        idg = np.where(distance_2D >= breakpoint_distance)
-
-        loss = np.empty(distance_2D.shape)
+        loss = xp.empty(distance_2D.shape)
 
         if len(idl[0]):
-            loss[idl] = 20 * np.log10(distance_3D[idl]) + \
-                20 * np.log10(frequency[idl]) - 27.55
+            loss[idl] = 20 * xp.log10(distance_3D[idl]) + \
+                20 * xp.log10(frequency[idl]) - 27.55
 
         if len(idg[0]):
             fitting_term = -10 * \
-                np.log10(
+                xp.log10(
                     breakpoint_distance**2 +
-                    (h_bs - h_ue[:, np.newaxis])**2,
+                    (h_bs - h_ue[:, xp.newaxis])**2,
                 )
-            loss[idg] = 40 * np.log10(distance_3D[idg]) + 20 * \
-                np.log10(frequency[idg]) - 27.55 + fitting_term[idg]
+            loss[idg] = 40 * xp.log10(distance_3D[idg]) + 20 * \
+                xp.log10(frequency[idg]) - 27.55 + fitting_term[idg]
 
         if shadowing_std:
-            shadowing = self.random_number_gen.normal(
-                0, shadowing_std, distance_2D.shape,
-            )
+            shadowing = backend.asarray(self.random_number_gen.normal(
+                0, shadowing_std, backend.asnumpy(distance_2D).shape,
+            ))
         else:
             shadowing = 0
 
@@ -229,21 +228,21 @@ class PropagationUMa(Propagation):
             frequency : center frequency [MHz]
             h_bs : array of base stations antenna heights [m]
             h_ue : array of user equipments antenna heights [m]        """
-        loss_nlos = -46.46 + 39.08 * np.log10(distance_3D) + 20 * np.log10(frequency) \
-            - 0.6 * (h_ue[:, np.newaxis] - 1.5)
+        loss_nlos = -46.46 + 39.08 * xp.log10(distance_3D) + 20 * xp.log10(frequency) \
+            - 0.6 * (h_ue[:, xp.newaxis] - 1.5)
 
-        idl = np.where(distance_2D < 5000)
+        idl = xp.where(distance_2D < 5000)
         if len(idl[0]):
             loss_los = self.get_loss_los(
                 distance_2D, distance_3D,
                 frequency, h_bs, h_ue, h_e, 0,
             )
-            loss_nlos[idl] = np.maximum(loss_los[idl], loss_nlos[idl])
+            loss_nlos[idl] = xp.maximum(loss_los[idl], loss_nlos[idl])
 
         if shadowing_std:
-            shadowing = self.random_number_gen.normal(
-                0, shadowing_std, distance_3D.shape,
-            )
+            shadowing = backend.asarray(self.random_number_gen.normal(
+                0, shadowing_std, backend.asnumpy(distance_3D).shape,
+            ))
         else:
             shadowing = 0
 
@@ -271,7 +270,7 @@ class PropagationUMa(Propagation):
         """
         #  calculate the effective antenna heights
         h_bs_eff = h_bs - h_e
-        h_ue_eff = h_ue[:, np.newaxis] - h_e
+        h_ue_eff = h_ue[:, xp.newaxis] - h_e
 
         # calculate the breakpoint distance
         breakpoint_distance = 4 * h_bs_eff * \
