@@ -5,15 +5,6 @@ Created on Tue Dec 12 17:45:50 2017
 @author: edgar
 """
 from multipledispatch import dispatch
-
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
 import sys
 import numpy as np
 
@@ -65,7 +56,7 @@ class PropagationIndoor(Propagation):
         self.ue_per_building = ue_per_cell * param.num_cells
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, _ArrayType, _ArrayType)
+              StationManager, np.ndarray, np.ndarray)
     def get_loss(
         self,
         params: Parameters,
@@ -131,7 +122,7 @@ class PropagationIndoor(Propagation):
 
     # pylint: disable=function-redefined
     # pylint: disable=arguments-renamed
-    @dispatch(_ArrayType, _ArrayType, _ArrayType, _ArrayType, _ArrayType, bool)
+    @dispatch(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool)
     def get_loss(
         self,
         distance_3D: np.ndarray,

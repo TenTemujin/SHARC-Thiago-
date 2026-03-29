@@ -3,6 +3,14 @@
 Created on Sat Apr 15 15:35:51 2017
 
 @author: Calil
+
+GPU Acceleration
+----------------
+The calculate_gain() and to_local_coord() methods are backend-agnostic
+and use xp from sharc.support.backend_handler.
+
+Note: _super_position_vector() and _weight_vector() run on CPU (NumPy)
+because they are called once per beam setup (not in the compute hot path).
 """
 
 import sys
@@ -15,6 +23,7 @@ from sharc.antenna.antenna_element_imt_const import AntennaElementImtConst
 from sharc.antenna.antenna_subarray_imt import AntennaSubarrayIMT
 from sharc.antenna.antenna import Antenna
 from sharc.parameters.imt.parameters_antenna_imt import ParametersAntennaImt
+from sharc.support.backend_handler import xp, backend
 
 
 class AntennaBeamformingImt(Antenna):
@@ -153,13 +162,8 @@ class AntennaBeamformingImt(Antenna):
         -------
         gains (np.array): gain corresponding to each of the given directions.
         """
-        import sys
-        if 'cupy' in sys.modules and type(kwargs.get("phi_vec")).__module__.startswith('cupy'):
-            import cupy as xp
-        else:
-            xp = np
-        phi_vec = xp.asarray(kwargs["phi_vec"])
-        theta_vec = xp.asarray(kwargs["theta_vec"])
+        phi_vec = xp.asarray(kwargs["phi_vec"], dtype=xp.float64)
+        theta_vec = xp.asarray(kwargs["theta_vec"], dtype=xp.float64)
 
         # Check if antenna gain has to be calculated on the co-channel or
         # on the adjacent channel
@@ -170,7 +174,6 @@ class AntennaBeamformingImt(Antenna):
 
         # If gain has to be calculated on the adjacent channel, then check whether
         # to use beamforming or single element pattern.
-        # Both options are explicitly written in order to improve readability
         if not co_channel:
             if self.adjacent_antenna_model == "SINGLE_ELEMENT":
                 co_channel = False
@@ -189,16 +192,16 @@ class AntennaBeamformingImt(Antenna):
             correction_factor = self.co_correction_factor_list
             correction_factor_idx = beams_l
         else:
-            beams_l = -1 * np.ones_like(phi_vec)
+            beams_l = -1 * np.ones_like(backend.asnumpy(phi_vec), dtype=int)
             if co_channel:
                 if self.normalize:
-                    lin_f = phi_vec / self.resolution
-                    col_f = theta_vec / self.resolution
+                    lin_f = backend.asnumpy(phi_vec) / self.resolution
+                    col_f = backend.asnumpy(theta_vec) / self.resolution
                     lin = lin_f.astype(int)
                     col = col_f.astype(int)
                     correction_factor = self.co_correction_factor[lin, col]
                 else:
-                    correction_factor = np.zeros_like(phi_vec)
+                    correction_factor = np.zeros(len(phi_vec))
                 correction_factor_idx = [
                     i for i in range(len(correction_factor))
                 ]
@@ -207,7 +210,7 @@ class AntennaBeamformingImt(Antenna):
 
         n_direct = len(lo_theta_vec)
 
-        gains = xp.zeros(n_direct)
+        gains = xp.zeros(n_direct, dtype=xp.float64)
 
         if co_channel:
             for g in range(n_direct):
@@ -226,9 +229,9 @@ class AntennaBeamformingImt(Antenna):
                 gains[g] = elem_g \
                     + self.adj_correction_factor
 
-        gains = np.maximum(gains, self.minimum_array_gain)
+        gains = xp.maximum(gains, self.minimum_array_gain)
 
-        return gains
+        return backend.asnumpy(gains)
 
     def reset_beams(self):
         """Reset beams lists
@@ -336,13 +339,13 @@ class AntennaBeamformingImt(Antenna):
         return gain
 
     def to_local_coord(self, phi: float, theta: float) -> tuple:
-        """Returns phi and theta to antennas local coordintate system
+        """Returns phi and theta to antennas local coordinate system.
 
         Parameters
         ----------
-        phi : float
+        phi : float or array
             phi in the simulator's coordinate system
-        theta : float
+        theta : float or array
             theta in the simulator's coordinate system
 
         Returns
@@ -350,22 +353,16 @@ class AntennaBeamformingImt(Antenna):
         tuple
             phi, theta in the antenna's coordinate system
         """
-        import sys
-        if 'cupy' in sys.modules and type(phi).__module__.startswith('cupy'):
-            import cupy as xp
-        else:
-            xp = np
+        phi_rad = xp.deg2rad(xp.asarray(phi, dtype=xp.float64))
+        theta_rad = xp.deg2rad(xp.asarray(theta, dtype=xp.float64))
 
-        phi_rad = xp.deg2rad(phi)
-        theta_rad = xp.deg2rad(theta)
-
-        if xp.isscalar(phi_rad):
-            phi_rad = xp.array([phi_rad])
+        if xp.isscalar(phi_rad) or phi_rad.ndim == 0:
+            phi_rad = xp.reshape(phi_rad, (1,))
         else:
             phi_rad = phi_rad.ravel()
 
-        if xp.isscalar(theta_rad):
-            theta_rad = xp.array([theta_rad])
+        if xp.isscalar(theta_rad) or theta_rad.ndim == 0:
+            theta_rad = xp.reshape(theta_rad, (1,))
         else:
             theta_rad = theta_rad.ravel()
 
@@ -375,20 +372,14 @@ class AntennaBeamformingImt(Antenna):
             xp.cos(theta_rad),
         ])
 
-        rot_mtx = xp.asarray(self.rotation_mtx)
+        rot_mtx = xp.asarray(self.rotation_mtx, dtype=xp.float64)
         rotated_points = xp.dot(rot_mtx, points)
 
         lo_phi = xp.ravel(
-            xp.asarray(
-                xp.rad2deg(
-                    xp.arctan2(rotated_points[1], rotated_points[0]),
-                ),
-            ),
+            xp.rad2deg(xp.arctan2(rotated_points[1], rotated_points[0]))
         )
         lo_theta = xp.ravel(
-            xp.asarray(
-                xp.rad2deg(xp.arccos(rotated_points[2])),
-            ),
+            xp.rad2deg(xp.arccos(xp.clip(rotated_points[2], -1.0, 1.0)))
         )
 
         return lo_phi, lo_theta

@@ -7,15 +7,6 @@ Created on Thu Feb 16 12:04:27 2017
 import numpy as np
 from multipledispatch import dispatch
 
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
-
 from sharc.propagation.propagation import Propagation
 from sharc.propagation.propagation_p619 import PropagationP619
 from sharc.propagation.propagation_free_space import PropagationFreeSpace
@@ -47,7 +38,7 @@ class PropagationSatSimple(Propagation):
         self.atmospheric_loss = 0.75
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, _ArrayType, _ArrayType)
+              StationManager, np.ndarray, np.ndarray)
     def get_loss(
         self,
         params: Parameters,
@@ -108,7 +99,7 @@ class PropagationSatSimple(Propagation):
             indoor_stations,
             elevation_angles)
 
-    @dispatch(_ArrayType, _ArrayType, _ArrayType, dict)
+    @dispatch(np.ndarray, np.ndarray, np.ndarray, dict)
     def get_loss(
         self,
         distance: np.array,

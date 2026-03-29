@@ -17,15 +17,6 @@ Refs:
 from __future__ import annotations
 
 from multipledispatch import dispatch
-
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
 import numpy as np
 
 from sharc.propagation.propagation import Propagation
@@ -74,7 +65,7 @@ class PropagationP528(Propagation):
     # ------------------------------------------------------------------
     # Public wrapper compatible with PropagationP619.get_loss(...)
     # ------------------------------------------------------------------
-    @dispatch(Parameters, float, StationManager, StationManager, _ArrayType, _ArrayType)
+    @dispatch(Parameters, float, StationManager, StationManager, np.ndarray, np.ndarray)
     def get_loss(self,
                  params: Parameters,
                  frequency: float,
@@ -115,7 +106,7 @@ class PropagationP528(Propagation):
     # ------------------------------------------------------------------
     # Core vectorized kernel (Annex 2, with explicit step markers 3-1..3-12)
     # ------------------------------------------------------------------
-    @dispatch(_ArrayType, _ArrayType, _ArrayType, _ArrayType, _ArrayType, int, _ArrayType)
+    @dispatch(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray)
     def get_loss(self,
             distance: np.ndarray,
             frequency: np.ndarray,

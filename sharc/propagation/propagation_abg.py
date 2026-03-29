@@ -3,23 +3,20 @@
 Created on Tue Jul  4 11:57:41 2017
 
 @author: LeticiaValle_Mac
+
+GPU Acceleration
+----------------
+When SHARC_USE_GPU=1 the main get_loss() dispatches to
+sharc.propagation.propagation_gpu.abg_get_loss_gpu.
 """
 
 import numpy as np
 from multipledispatch import dispatch
 
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
-
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
+from sharc.support.backend_handler import backend
 
 
 class PropagationABG(Propagation):
@@ -45,7 +42,7 @@ class PropagationABG(Propagation):
         self.shadowing_sigma_dB = 6.5
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, _ArrayType, _ArrayType)
+              StationManager, np.ndarray, np.ndarray)
     def get_loss(
         self,
         params: Parameters,
@@ -87,7 +84,16 @@ class PropagationABG(Propagation):
         else:
             distances_3d = station_a.get_3d_distance_to(station_b)
 
+        # Convert CuPy arrays → NumPy so @dispatch can match the np.ndarray
+        # signature. The inner overload will re-wrap as CuPy if GPU is active.
+        _to_np = lambda a: a.get() if hasattr(a, 'get') else np.asarray(a)
+        distances_3d = _to_np(distances_3d)
+
         indoor_stations = station_a.indoor
+        if hasattr(indoor_stations, 'get'):
+            indoor_stations = indoor_stations.get()
+        else:
+            indoor_stations = np.asarray(indoor_stations)
 
         loss = \
             self.get_loss(
@@ -99,7 +105,7 @@ class PropagationABG(Propagation):
 
         return loss
 
-    @dispatch(_ArrayType, _ArrayType, _ArrayType, bool)
+    @dispatch(np.ndarray, np.ndarray, np.ndarray, bool)
     def get_loss(
             self,
             distance: np.array,
@@ -107,24 +113,19 @@ class PropagationABG(Propagation):
             indoor_stations: np.array,
             shadowing: bool) -> np.array:
         """
-        Calculates path loss for LOS and NLOS cases with respective shadowing
-        (if shadowing is to be added)
-
-        Parameters
-        ----------
-            distance_2D (np.array) : distances between stations [m]
-            frequency (np.array) : center frequencie [MHz]
-            indoor_stations (np.array) : array indicating stations that are indoor
-            alpha (float): captures how the PL increases as the distance increases
-            beta (float): floating offset value in dB
-            gamma(float): captures the PL variation over the frequency
-            shadowing (bool) : standard deviation value
-
-        Returns
-        -------
-            array with path loss values with dimensions of distance_2D
-
+        Calculates ABG path loss — dispatches to GPU when SHARC_USE_GPU=1.
         """
+        if backend.use_gpu:
+            from sharc.propagation.propagation_gpu import abg_get_loss_gpu
+            result = abg_get_loss_gpu(
+                distance, frequency, indoor_stations,
+                self.alpha, self.beta, self.gamma,
+                self.building_loss, self.shadowing_sigma_dB,
+                shadowing, self.random_number_gen,
+            )
+            return backend.asnumpy(result)
+
+        # CPU path (original)
         if shadowing:
             shadowing = self.random_number_gen.normal(
                 0, self.shadowing_sigma_dB, distance.shape,

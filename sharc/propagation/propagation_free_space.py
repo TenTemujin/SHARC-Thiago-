@@ -3,22 +3,18 @@
 Created on Thu Feb 16 12:04:27 2017
 
 @author: edgar
+
+GPU Acceleration
+----------------
+get_free_space_loss() uses xp (CuPy/NumPy) from backend_handler.
 """
 import numpy as np
 from multipledispatch import dispatch
 
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
-
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
+from sharc.support.backend_handler import xp, backend
 
 
 class PropagationFreeSpace(Propagation):
@@ -29,7 +25,7 @@ class PropagationFreeSpace(Propagation):
     """
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, _ArrayType, _ArrayType)
+              StationManager, np.ndarray, np.ndarray)
     def get_loss(
         self,
         params: Parameters,
@@ -62,7 +58,7 @@ class PropagationFreeSpace(Propagation):
 
         return loss
 
-    @dispatch(_ArrayType, _ArrayType)
+    @dispatch(np.ndarray, np.ndarray)
     def get_loss(self, distance_3D: np.array, frequency: float) -> np.array:
         """Calculate the free-space loss for the given 3D distance and frequency.
 
@@ -84,7 +80,7 @@ class PropagationFreeSpace(Propagation):
             self,
             frequency: float,
             distance: np.array) -> np.array:
-        """Calculates the free-space loss for the given distance and frequency
+        """Calculates the free-space loss for the given distance and frequency.
 
         Parameters
         ----------
@@ -92,12 +88,13 @@ class PropagationFreeSpace(Propagation):
             3D distance array between stations
         frequency : float
             wave frequency
+
         Returns
         -------
         np.array
             returns the path loss array with shape distance.shape
         """
-        from sharc.support.backend_handler import xp
-        loss = 20 * xp.log10(distance) + 20 * xp.log10(xp.asarray(frequency)) - 27.55
-
-        return loss
+        dist = backend.asarray(distance)
+        freq = float(frequency) if np.isscalar(frequency) else backend.asarray(frequency)
+        loss = 20 * xp.log10(xp.maximum(dist, 1e-6)) + 20 * xp.log10(freq) - 27.55
+        return backend.asnumpy(loss)

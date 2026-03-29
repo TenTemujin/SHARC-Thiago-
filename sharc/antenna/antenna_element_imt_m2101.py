@@ -6,8 +6,8 @@ Created on Fri Apr 14 14:13:58 2017
 """
 
 import numpy as np
-
 from sharc.parameters.imt.parameters_antenna_imt import ParametersAntennaImt
+from sharc.support.backend_handler import xp
 
 
 class AntennaElementImtM2101(object):
@@ -52,7 +52,7 @@ class AntennaElementImtM2101(object):
         -------
             a_h (np.array): horizontal radiation pattern gain value
         """
-        return -1.0 * np.minimum(self.multiplication_factor *
+        return -1.0 * xp.minimum(self.multiplication_factor *
                                  (phi / self.phi_3db)**2, self.am)
 
     def vertical_pattern(self, theta: np.array) -> np.array:
@@ -67,7 +67,7 @@ class AntennaElementImtM2101(object):
         -------
             a_v (np.array): vertical radiation pattern gain value
         """
-        return -1.0 * np.minimum(self.multiplication_factor *
+        return -1.0 * xp.minimum(self.multiplication_factor *
                                  ((theta - 90.0) / self.theta_3db)**2, self.sla_v)
 
     def element_pattern(self, phi: np.array, theta: np.array) -> np.array:
@@ -87,6 +87,6 @@ class AntennaElementImtM2101(object):
             self.horizontal_pattern(phi) +
             self.vertical_pattern(theta)
         )
-        gain = self.g_max - np.minimum(att, self.am)
+        gain = self.g_max - xp.minimum(att, self.am)
 
         return gain

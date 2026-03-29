@@ -4,14 +4,6 @@
 import numpy as np
 from multipledispatch import dispatch
 
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
@@ -1517,7 +1509,7 @@ class PropagationClearAir(Propagation):
         return Ldp, Ld50
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, _ArrayType, _ArrayType)
+              StationManager, np.ndarray, np.ndarray)
     def get_loss(
         self,
         params: Parameters,
@@ -1554,18 +1546,46 @@ class PropagationClearAir(Propagation):
         distance = station_a.get_3d_distance_to(
             station_b,
         ) * (1e-3)  # P.452 expects Kms
+        # P.452 is a serial CPU-only algorithm — ensure all arrays are NumPy
+        # even when GPU mode (CuPy) is active, to satisfy the @dispatch
+        # signature registered only for np.ndarray.
+        if hasattr(distance, 'get'):
+            distance = distance.get()
+        else:
+            distance = np.asarray(distance)
+
         frequency_array = frequency * \
             np.ones(distance.shape) * (1e-3)  # P.452 expects GHz
-        indoor_stations = np.tile(
-            station_b.indoor, (station_a.num_stations, 1),
-        )
+
+        _indoor = station_b.indoor
+        if hasattr(_indoor, 'get'):
+            _indoor = _indoor.get()
+        else:
+            _indoor = np.asarray(_indoor)
+        indoor_stations = np.tile(_indoor, (station_a.num_stations, 1))
+
         elevation = station_b.get_elevation(station_a)
+        if hasattr(elevation, 'get'):
+            elevation = elevation.get()
+        else:
+            elevation = np.asarray(elevation)
+
         if params.imt.interfered_with:
             tx_gain = station_a_gains
             rx_gain = station_b_gains
         else:
             tx_gain = station_b_gains
             rx_gain = station_a_gains
+
+        # Ensure gains are also NumPy arrays
+        if hasattr(tx_gain, 'get'):
+            tx_gain = tx_gain.get()
+        else:
+            tx_gain = np.asarray(tx_gain)
+        if hasattr(rx_gain, 'get'):
+            rx_gain = rx_gain.get()
+        else:
+            rx_gain = np.asarray(rx_gain)
 
         return self.get_loss(
             distance,
@@ -1577,8 +1597,8 @@ class PropagationClearAir(Propagation):
         )
 
     # pylint: disable=arguments-differ
-    @dispatch(_ArrayType, _ArrayType, _ArrayType,
-              _ArrayType, _ArrayType, _ArrayType)
+    @dispatch(np.ndarray, np.ndarray, np.ndarray,
+              np.ndarray, np.ndarray, np.ndarray)
     def get_loss(
         self, distance: np.ndarray, frequency: np.ndarray,
         indoor_stations: np.ndarray, elevation: np.ndarray,
@@ -1606,20 +1626,6 @@ class PropagationClearAir(Propagation):
         np.array
             array of losses
         """
-        is_cupy = False
-        try:
-            import cupy as cp
-            if isinstance(distance, cp.ndarray):
-                is_cupy = True
-                distance = distance.get()
-                frequency = frequency.get() if isinstance(frequency, cp.ndarray) else frequency
-                indoor_stations = indoor_stations.get() if isinstance(indoor_stations, cp.ndarray) else indoor_stations
-                elevation = elevation.get() if isinstance(elevation, cp.ndarray) else elevation
-                tx_gain = tx_gain.get() if isinstance(tx_gain, cp.ndarray) else tx_gain
-                rx_gain = rx_gain.get() if isinstance(rx_gain, cp.ndarray) else rx_gain
-        except ImportError:
-            pass
-
         frequency = np.unique(frequency)
         if len(frequency) > 1:
             error_message = "different frequencies not supported in P.452"
@@ -1943,12 +1949,5 @@ class PropagationClearAir(Propagation):
         )
         building_loss = b_loss * indoor_stations
         lb_new = Lb + clutter_loss + building_loss
-
-        if is_cupy:
-            try:
-                import cupy as cp
-                lb_new = cp.asarray(lb_new)
-            except ImportError:
-                pass
 
         return lb_new

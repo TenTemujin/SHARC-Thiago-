@@ -3,22 +3,20 @@
 Created on Mon Jul  3 10:29:47 2017
 
 @author: LeticiaValle_Mac
+
+GPU Acceleration
+----------------
+When SHARC_USE_GPU=1 the main get_loss() dispatches to
+sharc.propagation.propagation_gpu.umi_get_loss_gpu which uses
+branchless xp.where instead of scatter indexing.
 """
 import numpy as np
 from multipledispatch import dispatch
 
-import sys
-import numpy as _np
-try:
-    import cupy as _cp
-    _ArrayType = (_np.ndarray, _cp.ndarray)
-except ImportError:
-    _ArrayType = (_np.ndarray,)
-
-
 from sharc.propagation.propagation import Propagation
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
+from sharc.support.backend_handler import backend
 
 
 class PropagationUMi(Propagation):
@@ -37,7 +35,7 @@ class PropagationUMi(Propagation):
         self.los_adjustment_factor = los_adjustment_factor
 
     @dispatch(Parameters, float, StationManager,
-              StationManager, _ArrayType, _ArrayType)
+              StationManager, np.ndarray, np.ndarray)
     def get_loss(
         self,
         params: Parameters,
@@ -81,20 +79,26 @@ class PropagationUMi(Propagation):
             distance_2d = station_a.get_distance_to(station_b)
             distance_3d = station_a.get_3d_distance_to(station_b)
 
+        # Convert CuPy arrays → NumPy so @dispatch can match the np.ndarray
+        # signature. The inner overload will re-wrap as CuPy if GPU is active.
+        _to_np = lambda a: a.get() if hasattr(a, 'get') else np.asarray(a)
+        distance_2d = _to_np(distance_2d)
+        distance_3d = _to_np(distance_3d)
+        bs_height = _to_np(station_b.height)
+        ue_height = _to_np(station_a.height)
+
         loss = self.get_loss(
             distance_3d,
             distance_2d,
             frequency * np.ones(distance_2d.shape),
-            station_b.height,
-            station_a.height,
+            bs_height,
+            ue_height,
             params.imt.shadowing,
         )
 
         return loss
 
-    # pylint: disable=function-redefined
-    # pylint: disable=arguments-renamed
-    @dispatch(_ArrayType, _ArrayType, _ArrayType, _ArrayType, _ArrayType, bool)
+    @dispatch(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool)
     def get_loss(
         self,
         distance_3D: np.array,
@@ -105,26 +109,23 @@ class PropagationUMi(Propagation):
         shadowing_flag: bool,
     ) -> np.array:
         """
-        Calculates path loss for LOS and NLOS cases with respective shadowing
-        (if shadowing is to be added)
-
-        Parameters
-        ----------
-            distance_3D (np.array) : 3D distances between base stations and user equipment
-            distance_2D (np.array) : 2D distances between base stations and user equipment
-            frequency (np.array) : center frequencies [MHz]
-            bs_height (np.array) : base station antenna heights
-            ue_height (np.array) : user equipment antenna heights
-            shadowing (bool) : if shadowing should be added or not
-
-        Returns
-        -------
-            array with path loss values with dimensions of distance_2D
+        Calculates path loss for LOS and NLOS cases with respective shadowing.
+        Dispatches to GPU-accelerated branchless implementation when available.
         """
+        if backend.use_gpu:
+            from sharc.propagation.propagation_gpu import umi_get_loss_gpu
+            result = umi_get_loss_gpu(
+                distance_3D, distance_2D, frequency,
+                bs_height, ue_height, shadowing_flag,
+                self.los_adjustment_factor,
+                self.random_number_gen,
+            )
+            return backend.asnumpy(result)
+
+        # CPU path (original implementation)
         if shadowing_flag:
             shadowing_los = 4
-            shadowing_nlos = 7.82    # option 1 for UMi NLOS
-            # shadowing_nlos = 8.2    # option 2 for UMi NLOS
+            shadowing_nlos = 7.82
         else:
             shadowing_los = 0
             shadowing_nlos = 0
@@ -144,25 +145,15 @@ class PropagationUMi(Propagation):
 
         if len(i_los[0]):
             loss_los = self.get_loss_los(
-                distance_2D,
-                distance_3D,
-                frequency,
-                bs_height,
-                ue_height,
-                h_e,
-                shadowing_los,
+                distance_2D, distance_3D, frequency,
+                bs_height, ue_height, h_e, shadowing_los,
             )
             loss[i_los] = loss_los[i_los]
 
         if len(i_nlos[0]):
             loss_nlos = self.get_loss_nlos(
-                distance_2D,
-                distance_3D,
-                frequency,
-                bs_height,
-                ue_height,
-                h_e,
-                shadowing_nlos,
+                distance_2D, distance_3D, frequency,
+                bs_height, ue_height, h_e, shadowing_nlos,
             )
             loss[i_nlos] = loss_nlos[i_nlos]
 

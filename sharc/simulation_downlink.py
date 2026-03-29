@@ -13,7 +13,6 @@ from sharc.simulation import Simulation
 from sharc.parameters.parameters import Parameters
 from sharc.station_factory import StationFactory
 from sharc.parameters.constants import BOLTZMANN_CONSTANT
-from sharc.support.backend_handler import xp, backend
 
 warn = warnings.warn
 
@@ -241,9 +240,9 @@ class SimulationDownlink(Simulation):
                             message="divide by zero encountered in log10",
                         )
                         in_band_interf_power = \
-                            self.param_system.tx_power_density + 10 * xp.log10(
-                                backend.asarray(self.ue.bandwidth[ue, np.newaxis]) * 1e6
-                            ) + 10 * xp.log10(weights)[:, np.newaxis] - \
+                            self.param_system.tx_power_density + 10 * np.log10(
+                                self.ue.bandwidth[ue, np.newaxis] * 1e6
+                            ) + 10 * np.log10(weights)[:, np.newaxis] - \
                             self.coupling_loss_imt_system[ue, :][:, active_sys]
 
             oob_power = np.resize(-500., (len(ue), 1))
@@ -352,24 +351,21 @@ class SimulationDownlink(Simulation):
                 # Out of band power
                 # sum linearly power leaked into band and power received in the
                 # adjacent band
-                oob_power = 10 * xp.log10(
+                oob_power = 10 * np.log10(
                     10 ** (0.1 * tx_oob) + 10 ** (0.1 * rx_oob)
                 )
             # Total external interference into the UE in dBm
-            ue_ext_int = 10 * xp.log10(xp.power(10,
-                                                0.1 * in_band_interf_power) + xp.power(10,
+            ue_ext_int = 10 * np.log10(np.power(10,
+                                                0.1 * in_band_interf_power) + np.power(10,
                                                                                        0.1 * oob_power))
 
             # Sum all the interferers for each UE
-            self.ue.ext_interference[ue] = backend.asnumpy(
-                10 * xp.log10(xp.sum(xp.power(10, 0.1 * ue_ext_int), axis=1)) + 30
-            )
+            self.ue.ext_interference[ue] = 10 * \
+                np.log10(np.sum(np.power(10, 0.1 * ue_ext_int), axis=1)) + 30
 
             self.ue.sinr_ext[ue] = \
-                self.ue.rx_power[ue] - backend.asnumpy(
-                    10 * xp.log10(xp.power(10, 0.1 * backend.asarray(self.ue.total_interference[ue])) +
-                                  xp.power(10, 0.1 * backend.asarray(self.ue.ext_interference[ue])))
-                )
+                self.ue.rx_power[ue] - (10 * np.log10(np.power(10, 0.1 * self.ue.total_interference[ue]) +
+                                                      np.power(10, 0.1 * (self.ue.ext_interference[ue]))))
 
             # Calculate INR in dB
             self.ue.thermal_noise[ue] = \
@@ -441,9 +437,9 @@ class SimulationDownlink(Simulation):
                 self.param_system.frequency,
             )
 
-            interference = backend.asarray(self.bs.tx_power[frst_bs])
-            pow_coch = 10 * xp.log10(
-                weights * xp.power(
+            interference = self.bs.tx_power[frst_bs]
+            pow_coch = 10 * np.log10(
+                weights * np.power(
                     10,
                     0.1 * interference,
                 ),
@@ -532,9 +528,9 @@ class SimulationDownlink(Simulation):
                 )
             ]
             if self.co_channel:
-                rx_interference += float(xp.sum(
+                rx_interference += np.sum(
                     10 ** (0.1 * (pow_coch - self.coupling_loss_imt_system[active_beams, sys_active]))
-                ))
+                )
 
             if self.adjacent_channel:
                 # oob_power per beam
@@ -548,23 +544,23 @@ class SimulationDownlink(Simulation):
                 # so more would have to be fixed before this
                 assert np.all(adj_loss == adj_loss.flat[0])
 
-                tx_oob_s = backend.asarray(tx_oob) - adj_loss[0, :]
+                tx_oob_s = tx_oob - adj_loss[0, :]
                 if self.param_system.adjacent_ch_reception != "OFF":
-                    rx_oob_s = backend.asarray(rx_oob) - self.coupling_loss_imt_system[active_beams, sys_active]
+                    rx_oob_s = rx_oob - self.coupling_loss_imt_system[active_beams, sys_active]
                 else:
-                    rx_oob_s = backend.asarray(-np.inf)
+                    rx_oob_s = -np.inf
 
                 # Out of band power
                 # sum linearly power leaked into band and power received in the
                 # adjacent band
-                oob_power = 10 * xp.log10(
+                oob_power = 10 * np.log10(
                     10 ** (0.1 * tx_oob_s) + 10 ** (0.1 * rx_oob_s)
                 )
 
                 # System rx interference
-                rx_interference += float(xp.sum(
-                    xp.power(10, 0.1 * oob_power)
-                ))
+                rx_interference += np.sum(
+                    np.power(10, 0.1 * oob_power)
+                )
 
         # Total received interference - dBW
         self.system.rx_interference = 10 * np.log10(rx_interference)

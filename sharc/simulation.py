@@ -3,6 +3,14 @@
 Created on Wed Jan 11 19:04:03 2017
 
 @author: edgar
+
+GPU Acceleration
+----------------
+Antenna gain calculations use GPU-accelerated batched operations via
+sharc.antenna.antenna_gain_vectorized.compute_gains_batch when
+AntennaBeamformingImt antennas are detected.
+
+Activate GPU mode: set environment variable SHARC_USE_GPU=1
 """
 
 from abc import ABC, abstractmethod
@@ -11,7 +19,6 @@ from sharc.support.observable import Observable
 import numpy as np
 import math
 import sys
-from sharc.support.backend_handler import xp, backend
 import matplotlib.pyplot as plt
 
 from sharc.support.enumerations import StationType
@@ -22,6 +29,9 @@ from sharc.station_manager import StationManager
 from sharc.results import Results
 from sharc.propagation.propagation_factory import PropagationFactory
 from sharc.support.sharc_utils import wrap2_180, clip_angle
+from sharc.support.backend_handler import backend
+from sharc.antenna.antenna_gain_vectorized import compute_gains_batch
+from sharc.antenna.antenna_beamforming_imt import AntennaBeamformingImt
 
 
 class Simulation(ABC, Observable):
@@ -367,26 +377,26 @@ class Simulation(ABC, Observable):
             path_loss = path_loss[0]
 
         if imt_station.station_type is StationType.IMT_UE:
-            self.imt_system_path_loss = backend.asarray(path_loss)
+            self.imt_system_path_loss = path_loss
         else:
             # Repeat for each BS beam
-            self.imt_system_path_loss = xp.repeat(
-                backend.asarray(path_loss), self.parameters.imt.ue.k, 1,
+            self.imt_system_path_loss = np.repeat(
+                path_loss, self.parameters.imt.ue.k, 1,
             )
 
-        self.system_imt_antenna_gain = backend.asarray(gain_sys_to_imt)
+        self.system_imt_antenna_gain = gain_sys_to_imt
 
         if is_co_channel:
-            self.imt_system_antenna_gain = backend.asarray(gain_imt_to_sys)
+            self.imt_system_antenna_gain = gain_imt_to_sys
         else:
-            self.imt_system_antenna_gain_adjacent = backend.asarray(gain_imt_to_sys)
+            self.imt_system_antenna_gain_adjacent = gain_imt_to_sys
 
         # calculate coupling loss
         coupling_loss = \
-            self.imt_system_path_loss - self.system_imt_antenna_gain - backend.asarray(gain_imt_to_sys) + additional_loss
+            self.imt_system_path_loss - self.system_imt_antenna_gain - gain_imt_to_sys + additional_loss
 
         # Simulator expects imt_stations x system_stations shape
-        return xp.transpose(coupling_loss)
+        return np.transpose(coupling_loss)
 
     def calculate_intra_imt_coupling_loss(
         self,
@@ -440,9 +450,9 @@ class Simulation(ABC, Observable):
         )
 
         # Collect IMT BS and UE antenna gain samples
-        self.path_loss_imt = xp.transpose(backend.asarray(path_loss))
-        self.imt_bs_antenna_gain = backend.asarray(ant_gain_bs_to_ue)
-        self.imt_ue_antenna_gain = xp.transpose(backend.asarray(ant_gain_ue_to_bs))
+        self.path_loss_imt = np.transpose(path_loss)
+        self.imt_bs_antenna_gain = ant_gain_bs_to_ue
+        self.imt_ue_antenna_gain = np.transpose(ant_gain_ue_to_bs)
         additional_loss = self.parameters.imt.bs.ohmic_loss \
             + self.parameters.imt.ue.ohmic_loss \
             + self.parameters.imt.ue.body_loss
@@ -557,14 +567,6 @@ class Simulation(ABC, Observable):
             # NOTE: bs beam has same tx bw as its assigned UEs
             self.bs.center_freq[bs] = self.ue.center_freq[ue]
 
-    def _is_beamforming_antenna(self, station: StationManager) -> bool:
-        """Check if all active antennas on station are AntennaBeamformingImt."""
-        from sharc.antenna.antenna_beamforming_imt import AntennaBeamformingImt
-        active = np.where(station.active)[0]
-        if len(active) == 0:
-            return False
-        return all(isinstance(station.antenna[k], AntennaBeamformingImt) for k in active)
-
     def calculate_gains(
         self,
         station_1: StationManager,
@@ -572,91 +574,172 @@ class Simulation(ABC, Observable):
         c_channel=True,
     ) -> np.array:
         """
-        Calculates the gains of antennas in station_1 in the direction of
-        station_2.
+        Calculates the gains of antennas in station_1 in the direction of station_2.
 
-        Uses a vectorized batch path for AntennaBeamformingImt antennas
-        (eliminates per-station Python loops), and falls back to the original
-        per-station loop for non-beamforming antennas.
+        Uses GPU-accelerated batched computation when station_1 has
+        AntennaBeamformingImt antennas. Falls back to the original sequential
+        loop for non-IMT (FSS, RAS, etc.) station types.
         """
-        from sharc.antenna.antenna_gain_vectorized import compute_gains_batch
-
         station_1_active = np.where(station_1.active)[0]
         station_2_active = np.where(station_2.active)[0]
 
         # Initialize variables (phi, theta, beams_idx)
-        expand_bs_beams = False
-        if (station_1.station_type is StationType.IMT_BS):
-            if (station_2.station_type is StationType.IMT_UE):
-                phi = self.bs_to_ue_phi
-                theta = self.bs_to_ue_theta
+        beams_idx = np.zeros(len(station_2_active), dtype=int)
+        phi = None
+        theta = None
+
+        if station_1.station_type is StationType.IMT_BS:
+            if station_2.station_type is StationType.IMT_UE:
+                phi = backend.asnumpy(self.bs_to_ue_phi) if hasattr(self.bs_to_ue_phi, 'get') else np.asarray(self.bs_to_ue_phi)
+                theta = backend.asnumpy(self.bs_to_ue_theta) if hasattr(self.bs_to_ue_theta, 'get') else np.asarray(self.bs_to_ue_theta)
                 beams_idx = self.bs_to_ue_beam_rbs[station_2_active]
             elif not station_2.is_imt_station():
-                phi, theta = station_1.get_pointing_vector_to(station_2)
-                phi = np.repeat(backend.asnumpy(phi), self.parameters.imt.ue.k, 0)
-                theta = np.repeat(backend.asnumpy(theta), self.parameters.imt.ue.k, 0)
+                phi_gpu, theta_gpu = station_1.get_pointing_vector_to(station_2)
+                phi_np = backend.asnumpy(phi_gpu)
+                theta_np = backend.asnumpy(theta_gpu)
+                phi = np.repeat(phi_np, self.parameters.imt.ue.k, 0)
+                theta = np.repeat(theta_np, self.parameters.imt.ue.k, 0)
                 beams_idx = np.tile(
                     np.arange(self.parameters.imt.ue.k), self.bs.num_stations,
                 )
-                expand_bs_beams = True
 
-        elif (station_1.station_type is StationType.IMT_UE):
-            phi, theta = station_1.get_pointing_vector_to(station_2)
+        elif station_1.station_type is StationType.IMT_UE:
+            phi_gpu, theta_gpu = station_1.get_pointing_vector_to(station_2)
+            phi = backend.asnumpy(phi_gpu)
+            theta = backend.asnumpy(theta_gpu)
             beams_idx = np.zeros(len(station_2_active), dtype=int)
 
         elif not station_1.is_imt_station():
-            phi, theta = station_1.get_pointing_vector_to(station_2)
+            phi_gpu, theta_gpu = station_1.get_pointing_vector_to(station_2)
+            phi = backend.asnumpy(phi_gpu)
+            theta = backend.asnumpy(theta_gpu)
             beams_idx = np.zeros(len(station_2_active), dtype=int)
 
-        # --- Vectorized batch path for beamforming IMT antennas ---
-        use_batch = station_1.is_imt_station() and self._is_beamforming_antenna(station_1)
+        # ------------------------------------------------------------------
+        # Check if station_1 uses AntennaBeamformingImt (GPU-accelerated path)
+        # ------------------------------------------------------------------
+        use_beamforming = (
+            len(station_1_active) > 0
+            and isinstance(station_1.antenna[station_1_active[0]], AntennaBeamformingImt)
+        )
 
-        if use_batch:
-            if station_1.station_type is StationType.IMT_BS and not station_2.is_imt_station():
-                gains = compute_gains_batch(
-                    backend.asnumpy(phi), backend.asnumpy(theta),
+        gains = np.zeros(phi.shape if phi is not None else (station_1.num_stations, station_2.num_stations))
+
+        # ----- IMT_BS → IMT_UE (co-channel, batched GPU) -----
+        if station_1.station_type is StationType.IMT_BS and station_2.station_type is StationType.IMT_UE:
+            if use_beamforming:
+                return compute_gains_batch(
+                    phi, theta,
                     station_1_active, station_2_active,
-                    station_1.antenna, beams_idx,
+                    station_1.antenna,
+                    beams_idx,
+                    co_channel=c_channel,
+                    expand_bs_beams=False,
+                    ue_k=self.parameters.imt.ue.k,
+                )
+            else:
+                for k in station_1_active:
+                    gains[k, station_2_active] = station_1.antenna[k].calculate_gain(
+                        phi_vec=phi[k, station_2_active],
+                        theta_vec=theta[k, station_2_active],
+                        beams_l=beams_idx,
+                        co_channel=c_channel,
+                    )
+                return gains
+
+        # ----- IMT_BS → system (expand beams, batched GPU) -----
+        if station_1.station_type is StationType.IMT_BS and not station_2.is_imt_station():
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
+            if use_beamforming:
+                return compute_gains_batch(
+                    phi, theta,
+                    station_1_active, station_2_active,
+                    station_1.antenna,
+                    beams_idx,
                     co_channel=c_channel,
                     expand_bs_beams=True,
                     ue_k=self.parameters.imt.ue.k,
                 )
-            elif station_1.station_type is StationType.IMT_UE and not station_2.is_imt_station():
-                gains = compute_gains_batch(
-                    backend.asnumpy(phi), backend.asnumpy(theta),
+            else:
+                for k in station_1_active:
+                    for b in range(
+                        k * self.parameters.imt.ue.k,
+                            (k + 1) * self.parameters.imt.ue.k):
+                        gains[b, station_2_active] = station_1.antenna[k].calculate_gain(
+                            phi_vec=phi[b, station_2_active],
+                            theta_vec=theta[b, station_2_active],
+                            beams_l=np.repeat(beams_idx[b], len(station_2_active)),
+                            co_channel=c_channel,
+                            off_axis_angle_vec=off_axis_angle[k, station_2_active],
+                        )
+                return gains
+
+        # ----- IMT_UE → system (batched GPU) -----
+        if station_1.station_type is StationType.IMT_UE and not station_2.is_imt_station():
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
+            if use_beamforming:
+                return compute_gains_batch(
+                    phi, theta,
                     station_1_active, station_2_active,
-                    station_1.antenna, beams_idx,
+                    station_1.antenna,
+                    beams_idx,
                     co_channel=c_channel,
+                    expand_bs_beams=False,
+                    ue_k=self.parameters.imt.ue.k,
                 )
-            else:  # IMT <-> IMT
-                gains = compute_gains_batch(
-                    backend.asnumpy(phi), backend.asnumpy(theta),
-                    station_1_active, station_2_active,
-                    station_1.antenna, beams_idx,
-                    co_channel=c_channel,
+            else:
+                for k in station_1_active:
+                    gains[k, station_2_active] = station_1.antenna[k].calculate_gain(
+                        off_axis_angle_vec=off_axis_angle[k, station_2_active],
+                        phi_vec=phi[k, station_2_active],
+                        theta_vec=theta[k, station_2_active],
+                        beams_l=beams_idx,
+                        co_channel=c_channel,
+                    )
+                return gains
+
+        # ----- RNS special case (single antenna) -----
+        if station_1.station_type is StationType.RNS:
+            gains[0, station_2_active] = station_1.antenna[0].calculate_gain(
+                phi_vec=phi[0, station_2_active],
+                theta_vec=theta[0, station_2_active],
+            )
+            return gains
+
+        # ----- Non-IMT system stations (FSS, HAPS, etc.) -----
+        if not station_1.is_imt_station():
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
+            phi_r, theta_r = station_1.get_pointing_vector_to(station_2)
+            phi_r = backend.asnumpy(phi_r)
+            theta_r = backend.asnumpy(theta_r)
+            for k in station_1_active:
+                gains[k, station_2_active] = station_1.antenna[k].calculate_gain(
+                    off_axis_angle_vec=off_axis_angle[k, station_2_active],
+                    theta_vec=theta_r[k, station_2_active],
+                    phi_vec=phi_r[k, station_2_active],
                 )
             return gains
 
-        # --- Fallback: per-station loop for non-beamforming antennas ---
-        gains = np.zeros(phi.shape)
-        phi_cpu = backend.asnumpy(phi)
-        theta_cpu = backend.asnumpy(theta)
-
-        if station_1.station_type is StationType.RNS:
-            gains[0, station_2_active] = station_1.antenna[0].calculate_gain(
-                phi_vec=phi_cpu[0, station_2_active],
-                theta_vec=theta_cpu[0, station_2_active],
+        # ----- IMT ↔ IMT (co-channel, batched GPU) -----
+        if use_beamforming:
+            off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
+            return compute_gains_batch(
+                phi, theta,
+                station_1_active, station_2_active,
+                station_1.antenna,
+                beams_idx,
+                co_channel=c_channel,
             )
-        elif not station_1.is_imt_station():
+        else:
             off_axis_angle = backend.asnumpy(station_1.get_off_axis_angle(station_2))
             for k in station_1_active:
-                gains[k, station_2_active] = \
-                    station_1.antenna[k].calculate_gain(
-                        off_axis_angle_vec=off_axis_angle[k, station_2_active],
-                        theta_vec=theta_cpu[k, station_2_active],
-                        phi_vec=phi_cpu[k, station_2_active],
+                gains[k, station_2_active] = station_1.antenna[k].calculate_gain(
+                    off_axis_angle_vec=off_axis_angle[k, station_2_active],
+                    phi_vec=phi[k, station_2_active],
+                    theta_vec=theta[k, station_2_active],
+                    beams_l=beams_idx,
                 )
-        return gains
+            return gains
 
     def calculate_imt_tput(
         self,
@@ -681,10 +764,10 @@ class Simulation(ABC, Observable):
         tput_max = attenuation_factor * \
             math.log2(1 + math.pow(10, 0.1 * sinr_max))
 
-        tput = attenuation_factor * xp.log2(1 + xp.power(10, 0.1 * backend.asarray(sinr)))
+        tput = attenuation_factor * np.log2(1 + np.power(10, 0.1 * sinr))
 
-        id_min = xp.where(backend.asarray(sinr) < sinr_min)[0]
-        id_max = xp.where(backend.asarray(sinr) > sinr_max)[0]
+        id_min = np.where(sinr < sinr_min)[0]
+        id_max = np.where(sinr > sinr_max)[0]
 
         if len(id_min) > 0:
             tput[id_min] = tput_min
@@ -723,9 +806,9 @@ class Simulation(ABC, Observable):
 
         # NOTE: using clip is necessary to prevent
         # floating point error to impact the expected result range [0, 1]
-        overlap = xp.clip((
-            xp.minimum(backend.asarray(ue_max_f), backend.asarray(sys_max_f)) - xp.maximum(backend.asarray(ue_min_f), backend.asarray(sys_min_f))
-        ) / backend.asarray(bw_ue), 0.0, 1.0)
+        overlap = np.clip((
+            np.minimum(ue_max_f, sys_max_f) - np.maximum(ue_min_f, sys_min_f)
+        ) / bw_ue, 0.0, 1.0)
 
         return overlap
 
