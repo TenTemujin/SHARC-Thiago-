@@ -89,6 +89,15 @@ class AntennaFactory():
         This is much more performant.
         """
         antennas = np.empty((n_stations,), dtype=Antenna)
+        # Ensure azimuth/elevation are plain numpy (may be CuPy when GPU active)
+        if hasattr(azimuth, 'get'):
+            azimuth = azimuth.get()
+        else:
+            azimuth = np.asarray(azimuth)
+        if hasattr(elevation, 'get'):
+            elevation = elevation.get()
+        else:
+            elevation = np.asarray(elevation)
         assert n_stations == len(azimuth)
         assert n_stations == len(elevation)
 

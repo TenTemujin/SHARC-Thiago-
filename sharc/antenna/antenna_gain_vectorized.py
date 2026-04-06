@@ -463,55 +463,87 @@ def compute_gains_batch(
     # Array factor
     # ------------------------------------------------------------------
     if effective_co:
-        # Build weight vector tensor: (N, M, n_rows, n_cols) complex
-        w_vecs_np = np.zeros((N, M, n_rows, n_cols), dtype=np.complex128)
+        # ------------------------------------------------------------------
+        # Vectorized weight-vector assembly
+        # ------------------------------------------------------------------
+        # FAST PATH: build a compact weight library (N, n_beams_max, nr, nc)
+        # and perform beam selection on the GPU with a single fancy-index op.
+        # This replaces the O(N × M) Python loop with an O(N × K) loop
+        # (N_stations × n_beams_per_station — typically 50-100× smaller).
+        # PCIe upload: (N, K, nr, nc) complex128 instead of (N, M, nr, nc).
+        # Example: 57 BS × 3 beams × 8×8 = ~168 KB  vs  57×171×8×8 = ~10 MB.
+        # ------------------------------------------------------------------
 
         if expand_bs_beams:
-            for v_idx, v_row in enumerate(virtual_rows):
+            # Each virtual row corresponds to a single, fixed beam from its parent BS.
+            # Build one weight per virtual row, then broadcast across M targets on GPU.
+            all_wl_exp = np.zeros((N, n_rows, n_cols), dtype=np.complex128)
+            for v_idx in range(N):
                 parent_k = s1a[v_idx // ue_k]
                 beam_b = v_idx % ue_k
-                ant = antennas[parent_k]
-                if beam_b < len(ant.w_vec_list):
-                    w = ant.w_vec_list[beam_b]
-                    # Broadcast same weight to all M targets
-                    w_vecs_np[v_idx, :] = w[None, :, :]
+                wl = antennas[parent_k].w_vec_list
+                if beam_b < len(wl):
+                    all_wl_exp[v_idx] = wl[beam_b]
+            # Upload (N, nr, nc) and broadcast across M targets — zero extra PCIe
+            wl_gpu_exp = backend.asarray(all_wl_exp)          # (N, nr, nc)
+            w_vecs_gpu = xp.ascontiguousarray(
+                xp.broadcast_to(wl_gpu_exp[:, None, :, :], (N, M, n_rows, n_cols))
+            )
         else:
+            # Main path: beams_idx selects one of K beams per target (same for all BSs).
+            # Build compact library (N, K, nr, nc) → index on GPU → (N, M, nr, nc).
             bi = np.asarray(beams_idx, dtype=int)
-            for s_idx, k in enumerate(s1a):
-                ant = antennas[k]
-                wl = ant.w_vec_list
-                n_beams = len(wl)
-                for t_idx in range(M):
-                    b = int(bi[t_idx]) if t_idx < len(bi) else 0
-                    if 0 <= b < n_beams:
-                        w_vecs_np[s_idx, t_idx] = wl[b]
-                    elif n_beams > 0:
-                        # Fallback: use maximum-gain beam
-                        w_vecs_np[s_idx, t_idx] = wl[0]
 
-        w_vecs_gpu = backend.asarray(w_vecs_np)
+            n_beams_per = [len(antennas[k].w_vec_list) for k in s1a]
+            n_beams_max = max(n_beams_per) if n_beams_per else 1
+
+            # O(N × K) Python loop — e.g. 57 BSs × 3 beams = 171 iterations
+            all_wl_np = np.zeros((N, n_beams_max, n_rows, n_cols), dtype=np.complex128)
+            for s_idx, k in enumerate(s1a):
+                wl = antennas[k].w_vec_list
+                nb = len(wl)
+                if nb > 0:
+                    # np.stack: (nb, nr, nc) — one NumPy call per station
+                    all_wl_np[s_idx, :nb] = np.stack(wl, axis=0)
+
+            # Clamp beam indices (handles -1 / out-of-range gracefully)
+            bi_safe = np.clip(bi, 0, n_beams_max - 1)  # (M,)
+
+            # Upload compact library — then index once on GPU
+            all_wl_gpu = backend.asarray(all_wl_np)      # (N, K, nr, nc)
+            bi_safe_gpu = backend.asarray(bi_safe)         # (M,)
+            w_vecs_gpu = all_wl_gpu[:, bi_safe_gpu, :, :] # (N, M, nr, nc) — GPU fancy-index
+
         array_g = _batch_array_factor_with_wvecs(
             lo_phi, lo_theta, w_vecs_gpu, n_rows, n_cols, dh, dv,
         )
 
-        # Normalization correction factors
+        # ------------------------------------------------------------------
+        # Normalization correction factors — same vectorized strategy
+        # ------------------------------------------------------------------
         corr = xp.zeros((N, M), dtype=xp.float64)
         if ref_ant.normalize:
             if expand_bs_beams:
+                # One scalar per virtual row, broadcast to M targets
+                cf_per_row = np.zeros(N, dtype=np.float64)
                 for v_idx in range(N):
                     parent_k = s1a[v_idx // ue_k]
                     beam_b = v_idx % ue_k
-                    ant = antennas[parent_k]
-                    if beam_b < len(ant.co_correction_factor_list):
-                        corr[v_idx, :] = float(ant.co_correction_factor_list[beam_b])
+                    cflist = antennas[parent_k].co_correction_factor_list
+                    if beam_b < len(cflist):
+                        cf_per_row[v_idx] = float(cflist[beam_b])
+                cf_gpu = backend.asarray(cf_per_row)       # (N,)
+                corr = xp.broadcast_to(cf_gpu[:, None], (N, M)).copy()
             else:
+                # O(N × K) compact build, then GPU fancy-index → (N, M)
+                all_cf_np = np.zeros((N, n_beams_max), dtype=np.float64)
                 for s_idx, k in enumerate(s1a):
-                    ant = antennas[k]
-                    cflist = ant.co_correction_factor_list
-                    for t_idx in range(M):
-                        b = int(beams_idx[t_idx]) if t_idx < len(beams_idx) else 0
-                        if 0 <= b < len(cflist):
-                            corr[s_idx, t_idx] = float(cflist[b])
+                    cflist = antennas[k].co_correction_factor_list
+                    for b_idx, cf in enumerate(cflist):
+                        if b_idx < n_beams_max:
+                            all_cf_np[s_idx, b_idx] = float(cf)
+                all_cf_gpu = backend.asarray(all_cf_np)    # (N, K)
+                corr = all_cf_gpu[:, bi_safe_gpu]           # (N, M) — GPU fancy-index
 
         gains_sub = elem_gain + array_g + corr
 
@@ -527,12 +559,10 @@ def compute_gains_batch(
 
     # ------------------------------------------------------------------
     # Write results back into full-size output array (CPU)
+    # Scatter only the active (N_act × M_act) sub-block — avoids
+    # downloading a full phi-sized GPU matrix when most stations are inactive.
     # ------------------------------------------------------------------
-    gains_full_gpu = xp.zeros(phi_gpu.shape, dtype=xp.float64)
-    row_idx = backend.asarray(virtual_rows)
-    col_idx = backend.asarray(s2a)
-
-    # Use open-mesh indexing for efficient scatter
-    gains_full_gpu[xp.ix_(row_idx, col_idx)] = gains_sub
-
-    return backend.asnumpy(gains_full_gpu)
+    gains_sub_np = backend.asnumpy(gains_sub)   # (N_act, M_act) — compact download
+    gains_full = np.zeros(np.asarray(phi).shape, dtype=np.float64)
+    gains_full[np.ix_(virtual_rows, s2a)] = gains_sub_np
+    return gains_full

@@ -79,24 +79,29 @@ class PropagationUMi(Propagation):
             distance_2d = station_a.get_distance_to(station_b)
             distance_3d = station_a.get_3d_distance_to(station_b)
 
-        # Convert CuPy arrays → NumPy so @dispatch can match the np.ndarray
-        # signature. The inner overload will re-wrap as CuPy if GPU is active.
+        # Phase 2: Stay on the active backend — no forced GPU→CPU roundtrip.
+        # height arrays are already on xp (GPU when active) from StationManager.__init__
+        bs_height = station_b.height
+        ue_height = station_a.height
+
+        freq_arr = frequency * np.ones(distance_2d.shape if hasattr(distance_2d, 'shape') else (1,))
+
+        if backend.use_gpu:
+            # Call GPU implementation directly — bypasses np.ndarray-typed dispatch.
+            from sharc.propagation.propagation_gpu import umi_get_loss_gpu
+            return umi_get_loss_gpu(
+                distance_3d, distance_2d, freq_arr,
+                bs_height, ue_height, params.imt.shadowing,
+                self.los_adjustment_factor,
+                self.random_number_gen,
+            )
+
+        # CPU fallback: convert to numpy if arrays are somehow GPU
         _to_np = lambda a: a.get() if hasattr(a, 'get') else np.asarray(a)
-        distance_2d = _to_np(distance_2d)
-        distance_3d = _to_np(distance_3d)
-        bs_height = _to_np(station_b.height)
-        ue_height = _to_np(station_a.height)
-
-        loss = self.get_loss(
-            distance_3d,
-            distance_2d,
-            frequency * np.ones(distance_2d.shape),
-            bs_height,
-            ue_height,
-            params.imt.shadowing,
+        return self._get_loss_cpu(
+            _to_np(distance_3d), _to_np(distance_2d), _to_np(freq_arr),
+            _to_np(bs_height), _to_np(ue_height), params.imt.shadowing,
         )
-
-        return loss
 
     @dispatch(np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool)
     def get_loss(
@@ -110,18 +115,22 @@ class PropagationUMi(Propagation):
     ) -> np.array:
         """
         Calculates path loss for LOS and NLOS cases with respective shadowing.
-        Dispatches to GPU-accelerated branchless implementation when available.
+        CPU-only path (called directly when not in GPU mode).
         """
-        if backend.use_gpu:
-            from sharc.propagation.propagation_gpu import umi_get_loss_gpu
-            result = umi_get_loss_gpu(
-                distance_3D, distance_2D, frequency,
-                bs_height, ue_height, shadowing_flag,
-                self.los_adjustment_factor,
-                self.random_number_gen,
-            )
-            return backend.asnumpy(result)
+        return self._get_loss_cpu(distance_3D, distance_2D, frequency, bs_height, ue_height, shadowing_flag)
 
+    def _get_loss_cpu(
+        self,
+        distance_3D: np.array,
+        distance_2D: np.array,
+        frequency: np.array,
+        bs_height: np.array,
+        ue_height: np.array,
+        shadowing_flag: bool,
+    ) -> np.array:
+        """
+        Calculates path loss for LOS and NLOS cases with respective shadowing (CPU path).
+        """
         # CPU path (original implementation)
         if shadowing_flag:
             shadowing_los = 4

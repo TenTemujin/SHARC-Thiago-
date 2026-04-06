@@ -29,7 +29,7 @@ from sharc.station_manager import StationManager
 from sharc.results import Results
 from sharc.propagation.propagation_factory import PropagationFactory
 from sharc.support.sharc_utils import wrap2_180, clip_angle
-from sharc.support.backend_handler import backend
+from sharc.support.backend_handler import backend, xp
 from sharc.antenna.antenna_gain_vectorized import compute_gains_batch
 from sharc.antenna.antenna_beamforming_imt import AntennaBeamformingImt
 
@@ -396,7 +396,8 @@ class Simulation(ABC, Observable):
             self.imt_system_path_loss - self.system_imt_antenna_gain - gain_imt_to_sys + additional_loss
 
         # Simulator expects imt_stations x system_stations shape
-        return np.transpose(coupling_loss)
+        # Force NumPy: this matrix is indexed in Python loops — CuPy would sync GPU on each access
+        return np.asarray(np.transpose(coupling_loss))
 
     def calculate_intra_imt_coupling_loss(
         self,
@@ -450,9 +451,12 @@ class Simulation(ABC, Observable):
         )
 
         # Collect IMT BS and UE antenna gain samples
-        self.path_loss_imt = np.transpose(path_loss)
-        self.imt_bs_antenna_gain = ant_gain_bs_to_ue
-        self.imt_ue_antenna_gain = np.transpose(ant_gain_ue_to_bs)
+        # Phase 3: keep intermediate results on active backend; only
+        # convert to NumPy at the return boundary where SINR loops need it.
+        _xp_transpose = xp.transpose if hasattr(path_loss, 'get') else np.transpose
+        self.path_loss_imt = np.asarray(_xp_transpose(path_loss))
+        self.imt_bs_antenna_gain = np.asarray(ant_gain_bs_to_ue)
+        self.imt_ue_antenna_gain = np.asarray(_xp_transpose(ant_gain_ue_to_bs))
         additional_loss = self.parameters.imt.bs.ohmic_loss \
             + self.parameters.imt.ue.ohmic_loss \
             + self.parameters.imt.ue.body_loss
@@ -461,7 +465,9 @@ class Simulation(ABC, Observable):
         coupling_loss = self.path_loss_imt - self.imt_bs_antenna_gain - \
             self.imt_ue_antenna_gain + additional_loss
 
-        return coupling_loss
+        # Force NumPy: coupling_loss_imt is indexed in Python loops in calculate_sinr()
+        # — if CuPy, every scalar index [bs, ue] would trigger a GPU sync.
+        return np.asarray(coupling_loss)
 
     def connect_ue_to_bs(self):
         """
@@ -471,13 +477,10 @@ class Simulation(ABC, Observable):
         """
         num_ue_per_bs = self.parameters.imt.ue.k * self.parameters.imt.ue.k_m
         bs_active = np.where(self.bs.active)[0]
+        # Vectorized: build link dict with arange slicing — no per-UE loop
         for bs in bs_active:
-            ue_list = [
-                i for i in range(
-                    bs * num_ue_per_bs, bs * num_ue_per_bs + num_ue_per_bs,
-                )
-            ]
-            self.link[bs] = ue_list
+            start = bs * num_ue_per_bs
+            self.link[bs] = list(range(start, start + num_ue_per_bs))
 
     def select_ue(self, random_number_gen: np.random.RandomState):
         """
@@ -487,15 +490,27 @@ class Simulation(ABC, Observable):
         if self.wrap_around_enabled:
             self.bs_to_ue_d_2D, self.bs_to_ue_d_3D, self.bs_to_ue_phi, self.bs_to_ue_theta = \
                 self.bs.get_dist_angles_wrap_around(self.ue)
+            # Distances may be CuPy — keep on GPU for GPU propagation models
+            # but angles must be NumPy for the antenna gain batch computation
+            self.bs_to_ue_phi = backend.asnumpy(self.bs_to_ue_phi) \
+                if hasattr(self.bs_to_ue_phi, 'get') else np.asarray(self.bs_to_ue_phi)
+            self.bs_to_ue_theta = backend.asnumpy(self.bs_to_ue_theta) \
+                if hasattr(self.bs_to_ue_theta, 'get') else np.asarray(self.bs_to_ue_theta)
         else:
             self.bs_to_ue_d_2D = self.bs.get_distance_to(self.ue)
             self.bs_to_ue_d_3D = self.bs.get_3d_distance_to(self.ue)
-            self.bs_to_ue_phi, self.bs_to_ue_theta = self.bs.get_pointing_vector_to(
-                self.ue, )
+            phi_gpu, theta_gpu = self.bs.get_pointing_vector_to(self.ue)
+            # Convert once here — avoids repeated GPU→CPU roundtrips in calculate_gains
+            self.bs_to_ue_phi = backend.asnumpy(phi_gpu) \
+                if hasattr(phi_gpu, 'get') else np.asarray(phi_gpu)
+            self.bs_to_ue_theta = backend.asnumpy(theta_gpu) \
+                if hasattr(theta_gpu, 'get') else np.asarray(theta_gpu)
 
         bs_active = np.where(self.bs.active)[0]
 
-        assert np.all((-180 <= self.bs.azimuth) & (self.bs.azimuth <= 180)), "BS azimuth angles should be in [-180, 180] range"
+        # Ensure azimuth is CPU for scalar indexing and comparisons in the loop below
+        bs_azimuth_np = backend.asnumpy(self.bs.azimuth) if backend.use_gpu else np.asarray(self.bs.azimuth)
+        assert np.all((-180 <= bs_azimuth_np) & (bs_azimuth_np <= 180)), "BS azimuth angles should be in [-180, 180] range"
         for bs in bs_active:
             # select K UE's among the ones that are connected to BS
             random_number_gen.shuffle(self.link[bs])
@@ -509,7 +524,7 @@ class Simulation(ABC, Observable):
 
                     # limit beamforming angle
                     beam_h_min, beam_h_max = wrap2_180(
-                        self.parameters.imt.bs.antenna.array.horizontal_beamsteering_range + self.bs.azimuth[bs]
+                        self.parameters.imt.bs.antenna.array.horizontal_beamsteering_range + bs_azimuth_np[bs]
                     )
 
                     bs_beam_phi = clip_angle(
@@ -548,24 +563,27 @@ class Simulation(ABC, Observable):
         a given BS
         """
         bs_active = np.where(self.bs.active)[0]
+        ue_active = np.where(self.ue.active)[0]
+        
         self.bs.center_freq = np.zeros(
             (self.bs.num_stations, self.parameters.imt.ue.k)
         )
-        for bs in bs_active:
-            ue = self.link[bs]
-            # NOTE: since all calculations are done per beam, we consider tx bw
-            # instead of channel bw
+        
+        if len(bs_active) > 0 and len(ue_active) > 0:
+            K = self.parameters.imt.ue.k
             num_rb_per_beam = self.num_rb_per_ue
-            self.bs.bandwidth[bs] = num_rb_per_beam * \
-                self.parameters.imt.rb_bandwidth
-            self.ue.bandwidth[ue] = self.num_rb_per_ue * \
-                self.parameters.imt.rb_bandwidth
-            self.ue.center_freq[ue] = np.array([
+            
+            self.bs.bandwidth[bs_active] = num_rb_per_beam * self.parameters.imt.rb_bandwidth
+            self.ue.bandwidth[ue_active] = num_rb_per_beam * self.parameters.imt.rb_bandwidth
+            
+            center_freqs_k = np.array([
                 self.parameters.imt.frequency +
-                self.num_rb_per_ue * self.parameters.imt.rb_bandwidth * (i - (len(ue) - 1) / 2) for i in range(len(ue))
+                num_rb_per_beam * self.parameters.imt.rb_bandwidth * (i - (K - 1) / 2) 
+                for i in range(K)
             ])
-            # NOTE: bs beam has same tx bw as its assigned UEs
-            self.bs.center_freq[bs] = self.ue.center_freq[ue]
+            
+            self.ue.center_freq[ue_active] = np.tile(center_freqs_k, len(bs_active))
+            self.bs.center_freq[bs_active] = center_freqs_k
 
     def calculate_gains(
         self,
@@ -590,8 +608,9 @@ class Simulation(ABC, Observable):
 
         if station_1.station_type is StationType.IMT_BS:
             if station_2.station_type is StationType.IMT_UE:
-                phi = backend.asnumpy(self.bs_to_ue_phi) if hasattr(self.bs_to_ue_phi, 'get') else np.asarray(self.bs_to_ue_phi)
-                theta = backend.asnumpy(self.bs_to_ue_theta) if hasattr(self.bs_to_ue_theta, 'get') else np.asarray(self.bs_to_ue_theta)
+                # bs_to_ue_phi/theta are already NumPy (converted once in select_ue)
+                phi = np.asarray(self.bs_to_ue_phi)
+                theta = np.asarray(self.bs_to_ue_theta)
                 beams_idx = self.bs_to_ue_beam_rbs[station_2_active]
             elif not station_2.is_imt_station():
                 phi_gpu, theta_gpu = station_1.get_pointing_vector_to(station_2)

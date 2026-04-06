@@ -87,21 +87,15 @@ class ComputeBackend:
             self._cupy = None
 
     def asnumpy(self, array):
-        """Transfer array from GPU (VRAM) to CPU (RAM) for I/O operations.
+        """Transfer array from GPU (VRAM) to CPU (RAM).
 
-        Parameters
-        ----------
-        array : array-like
-            CuPy or NumPy array.
-
-        Returns
-        -------
-        np.ndarray
-            NumPy array guaranteed to be on CPU.
+        Short-circuits if the array is already a NumPy ndarray.
         """
+        import numpy as np
+        if isinstance(array, np.ndarray):
+            return array  # already on CPU — zero-cost
         if self.use_gpu and hasattr(array, 'get'):
             return array.get()
-        import numpy as np
         if hasattr(array, '__array__'):
             return np.asarray(array)
         return array
@@ -109,20 +103,17 @@ class ComputeBackend:
     def asarray(self, array, dtype=None):
         """Load array into GPU memory (VRAM) if GPU is active.
 
-        Parameters
-        ----------
-        array : array-like
-            NumPy array or Python list/scalar.
-        dtype : dtype, optional
-            Target dtype for the array.
-
-        Returns
-        -------
-        xp.ndarray
-            CuPy array (GPU) or NumPy array (CPU).
+        Short-circuits if the array is already the correct backend type and dtype.
         """
         if dtype is not None:
+            # If already the right type+dtype, avoid the copy
+            if hasattr(array, 'dtype') and isinstance(array, type(self.xp.empty(0))):
+                if array.dtype == dtype:
+                    return array
             return self.xp.asarray(array, dtype=dtype)
+        # Fast path: already the right array type (CuPy or NumPy)
+        if isinstance(array, type(self.xp.empty(0))):
+            return array
         return self.xp.asarray(array)
 
     def synchronize(self):

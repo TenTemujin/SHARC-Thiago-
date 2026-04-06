@@ -185,8 +185,15 @@ def uma_get_loss_los_gpu(distance_2d, distance_3d, frequency,
 
 
 def uma_get_loss_nlos_gpu(distance_2d, distance_3d, frequency,
-                           h_bs, h_ue, h_e, shadowing_std, rng):
-    """UMa NLOS path loss — GPU vectorized."""
+                           h_bs, h_ue, h_e, shadowing_std, rng,
+                           loss_los_ref=None):
+    """UMa NLOS path loss — GPU vectorized.
+
+    Parameters
+    ----------
+    loss_los_ref : xp.ndarray, optional
+        Pre-computed LOS loss (no shadowing). If provided, avoids recomputing LOS.
+    """
     d3d = backend.asarray(distance_3d, dtype=xp.float64)
     d2d = backend.asarray(distance_2d, dtype=xp.float64)
     freq = backend.asarray(frequency, dtype=xp.float64)
@@ -199,16 +206,17 @@ def uma_get_loss_nlos_gpu(distance_2d, distance_3d, frequency,
         - 0.6 * (h_ue_a[xp.newaxis, :] - 1.5)
     )
 
-    # UMa NLOS ≥ UMa LOS (for d2d < 5000)
-    loss_los_ref = uma_get_loss_los_gpu(
-        distance_2d, distance_3d, frequency, h_bs, h_ue, h_e, 0, rng,
-    )
-    # Branchless: enforce max(nlos, los) everywhere (equivalent because los < nlos for d > some threshold)
+    # UMa NLOS >= UMa LOS (for d2d < 5000) — reuse pre-computed LOS if available
+    if loss_los_ref is None:
+        loss_los_ref = uma_get_loss_los_gpu(
+            distance_2d, distance_3d, frequency, h_bs, h_ue, h_e, 0, rng,
+        )
     d2d_mask = d2d < 5000.0
     loss_nlos = xp.where(d2d_mask, xp.maximum(loss_los_ref, loss_nlos), loss_nlos)
 
     if shadowing_std > 0:
-        shad_np = rng.normal(0, shadowing_std, distance_3d.shape)
+        # .shape on a CuPy array does NOT require GPU sync — no roundtrip needed
+        shad_np = rng.normal(0, shadowing_std, d3d.shape)
         loss_nlos = loss_nlos + backend.asarray(shad_np)
 
     return loss_nlos
@@ -237,25 +245,31 @@ def uma_get_loss_gpu(distance_3d, distance_2d, frequency,
     shadowing_los = 4 if shadowing else 0
     shadowing_nlos = 6 if shadowing else 0
 
-    h_e = xp.ones(backend.asnumpy(distance_2d).shape)
+    # .shape on CuPy array is zero-copy — no GPU sync required
+    h_e = xp.ones(distance_2d.shape)
 
-    # LOS probability and condition
+    # LOS probability and condition — .shape is zero-copy on CuPy
     los_prob = uma_get_los_probability_gpu(distance_2d, h_ue)
-    rand_sample = backend.asarray(rng.random_sample(backend.asnumpy(los_prob).shape))
+    rand_sample = backend.asarray(rng.random_sample(los_prob.shape))
     los_condition = rand_sample < los_prob  # (N_bs, N_ue) bool on GPU
 
-    freq_gpu = backend.asarray(
-        float(np.unique(backend.asnumpy(frequency))[0])
-        if hasattr(frequency, 'shape') else float(frequency)
-    )
-
-    loss_los = uma_get_loss_los_gpu(
+    # Compute LOS loss once (no shadowing) — reused by NLOS for max(LOS, NLOS)
+    loss_los_bare = uma_get_loss_los_gpu(
         distance_2d, distance_3d,
-        frequency, h_bs, h_ue, h_e, shadowing_los, rng,
+        frequency, h_bs, h_ue, h_e, 0, rng,
     )
+    # Apply shadowing on top of bare LOS
+    if shadowing_los > 0:
+        shad = backend.asarray(rng.normal(0, shadowing_los, loss_los_bare.shape))
+        loss_los = loss_los_bare + shad
+    else:
+        loss_los = loss_los_bare
+
+    # Pass bare LOS to NLOS to avoid recomputing it
     loss_nlos = uma_get_loss_nlos_gpu(
         distance_2d, distance_3d,
         frequency, h_bs, h_ue, h_e, shadowing_nlos, rng,
+        loss_los_ref=loss_los_bare,
     )
 
     # Branchless merge — one kernel instead of scatter + two separate kernels
@@ -337,8 +351,15 @@ def umi_get_loss_los_gpu(distance_2d, distance_3d, frequency,
 
 
 def umi_get_loss_nlos_gpu(distance_2d, distance_3d, frequency,
-                           h_bs, h_ue, h_e, shadowing_std, rng):
-    """UMi NLOS path loss — GPU vectorized."""
+                           h_bs, h_ue, h_e, shadowing_std, rng,
+                           loss_los_ref=None):
+    """UMi NLOS path loss — GPU vectorized.
+
+    Parameters
+    ----------
+    loss_los_ref : xp.ndarray, optional
+        Pre-computed LOS loss (no shadowing). Avoids recomputing LOS when provided.
+    """
     d3d = backend.asarray(distance_3d, dtype=xp.float64)
     freq = backend.asarray(frequency, dtype=xp.float64)
     h_ue_a = backend.asarray(h_ue, dtype=xp.float64)
@@ -350,13 +371,16 @@ def umi_get_loss_nlos_gpu(distance_2d, distance_3d, frequency,
         - 0.3 * (h_ue_a[xp.newaxis, :] - 1.5)
     )
 
-    loss_los = umi_get_loss_los_gpu(
-        distance_2d, distance_3d, frequency, h_bs, h_ue, h_e, 0, rng,
-    )
-    loss_nlos = xp.maximum(loss_los, loss_nlos)
+    # Reuse pre-computed LOS to avoid a full second LOS computation
+    if loss_los_ref is None:
+        loss_los_ref = umi_get_loss_los_gpu(
+            distance_2d, distance_3d, frequency, h_bs, h_ue, h_e, 0, rng,
+        )
+    loss_nlos = xp.maximum(loss_los_ref, loss_nlos)
 
     if shadowing_std > 0:
-        shad_np = rng.normal(0, shadowing_std, distance_3d.shape)
+        # .shape is zero-cost on CuPy — no GPU sync
+        shad_np = rng.normal(0, shadowing_std, d3d.shape)
         loss_nlos = loss_nlos + backend.asarray(shad_np)
 
     return loss_nlos
@@ -383,19 +407,28 @@ def umi_get_loss_gpu(distance_3d, distance_2d, frequency,
     shadowing_los = 4 if shadowing else 0
     shadowing_nlos = 7.82 if shadowing else 0
 
-    h_e = xp.ones(backend.asnumpy(distance_2d).shape)
+    # .shape on CuPy array is zero-copy — no GPU sync
+    h_e = xp.ones(distance_2d.shape)
 
     los_prob = umi_get_los_probability_gpu(distance_2d, los_adjustment_factor)
-    rand_sample = backend.asarray(rng.random_sample(backend.asnumpy(los_prob).shape))
+    rand_sample = backend.asarray(rng.random_sample(los_prob.shape))
     los_condition = rand_sample < los_prob
 
-    loss_los = umi_get_loss_los_gpu(
+    # Compute bare LOS once — reused as the max(LOS,NLOS) baseline in NLOS
+    loss_los_bare = umi_get_loss_los_gpu(
         distance_2d, distance_3d,
-        frequency, h_bs, h_ue, h_e, shadowing_los, rng,
+        frequency, h_bs, h_ue, h_e, 0, rng,
     )
+    if shadowing_los > 0:
+        shad = backend.asarray(rng.normal(0, shadowing_los, loss_los_bare.shape))
+        loss_los = loss_los_bare + shad
+    else:
+        loss_los = loss_los_bare
+
     loss_nlos = umi_get_loss_nlos_gpu(
         distance_2d, distance_3d,
         frequency, h_bs, h_ue, h_e, shadowing_nlos, rng,
+        loss_los_ref=loss_los_bare,
     )
 
     return _where_split(los_condition, loss_los, loss_nlos)
@@ -427,7 +460,8 @@ def abg_get_loss_gpu(distance, frequency, indoor_stations,
     f = backend.asarray(frequency, dtype=xp.float64)
 
     if shadowing:
-        shad_np = rng.normal(0, shadowing_sigma, backend.asnumpy(d).shape)
+        # d.shape is zero-copy on CuPy — no GPU sync needed
+        shad_np = rng.normal(0, shadowing_sigma, d.shape)
         shadow = backend.asarray(shad_np)
     else:
         shadow = 0.0
@@ -453,78 +487,62 @@ def abg_get_loss_gpu(distance, frequency, indoor_stations,
 # ---------------------------------------------------------------------------
 
 def sinr_intra_imt_gpu(
-    bs_active, link, tx_power_map, coupling_loss_imt,
+    bs_active, ue_active, tx_power_ue_active, coupling_loss_imt,
 ):
     """GPU-vectorized intra-IMT interference accumulation.
-
-    Replaces the double Python loop:
-        for bs in bs_active:
-            for bi in bs_interf:
-                interference += ...
-
-    Instead, accumulates all BS→UE interference in one matrix operation.
 
     Parameters
     ----------
     bs_active : np.ndarray (N_bs,)
-        Indices of active BSs.
-    link : dict
-        {bs: [ue_idx, ...]} — serving UEs per BS.
-    tx_power_map : dict
-        {bs: np.ndarray (K,)} — transmit powers per beam.
-    coupling_loss_imt : np.ndarray (N_bs, N_ue)
-        Coupling loss matrix (path loss - gains).
+        Indices of active base stations.
+    ue_active : np.ndarray (N_ue,)
+        Indices of active UEs (globally indexed).
+    tx_power_ue_active : np.ndarray (N_ue,)
+        Transmit power of each active UE [dBm] — flat array, same order as ue_active.
+    coupling_loss_imt : np.ndarray (N_bs_total, N_ue_total)
+        Full coupling loss matrix. Active subset is extracted here.
 
     Returns
     -------
-    dict
-        {ue_idx: rx_power_dBm} — received signal power per UE
-    dict
-        {ue_idx: interference_dBm} — total received interference power per UE
+    rx_power : np.ndarray (N_bs, K)  — dBm
+    rx_interference : np.ndarray (N_bs, K)  — dBm
+        Both indexed as (bs_idx_within_active, ue_within_bs) — i.e. flattened
+        across bs_active × K beams.
     """
-    # Build full TX power matrix on GPU: shape (N_bs, K)
-    # Then expand to (N_bs, N_ue) via link mapping
-    if len(bs_active) == 0:
-        return {}, {}
+    if len(bs_active) == 0 or len(ue_active) == 0:
+        return np.array([]), np.array([])
 
-    rx_power_out = {}
-    rx_interference_out = {}
+    N_bs = len(bs_active)
+    K = len(ue_active) // N_bs         # UEs per BS
 
+    # ── Move to GPU ──────────────────────────────────────────────────────────
     cpl = backend.asarray(coupling_loss_imt)
+    tx_pw = backend.asarray(tx_power_ue_active, dtype=xp.float64)  # (N_ue,)
 
-    # For each BS, signal power to its served UEs
-    for bs in bs_active:
-        ue = np.asarray(link[bs], dtype=int)
-        tx_p = np.asarray(tx_power_map[bs])
-        tx_p_gpu = backend.asarray(tx_p)
-        cpl_served = cpl[bs, ue]  # (K,)
-        rx_p = tx_p_gpu - cpl_served
-        for i, u in enumerate(ue):
-            rx_power_out[u] = float(backend.asnumpy(rx_p[i]))
+    # Active subset of coupling loss: (N_bs, N_ue)
+    cpl_active = cpl[xp.array(bs_active, dtype=xp.intp), :][:, xp.array(ue_active, dtype=xp.intp)]
 
-    # Interference from all other BSs: vectorized
-    # For each UE, accumulate power from all non-serving BSs
-    for bs in bs_active:
-        ue = np.asarray(link[bs], dtype=int)
-        interf_bs = [b for b in bs_active if b != bs]
-        if not interf_bs:
-            for u in ue:
-                rx_interference_out.setdefault(u, -500.0)
-            continue
+    # Linear received power from every UE at every BS: (N_bs, N_ue)
+    tx_lin = xp.power(10.0, 0.1 * tx_pw)                     # (N_ue,)
+    cpl_lin = xp.power(10.0, -0.1 * cpl_active)              # (N_bs, N_ue)
+    rx_lin_all = cpl_lin * tx_lin[xp.newaxis, :]             # (N_bs, N_ue)
 
-        interf_bs_arr = np.array(interf_bs, dtype=int)
-        # (N_interf, K) TX power for each interfering BS
-        # Flatten to per-ue basis for served UEs
-        for u_idx, u in enumerate(ue):
-            running_interf_lin = 0.0
-            for bi in interf_bs:
-                tx_bi = np.asarray(tx_power_map[bi])
-                cpl_bi_ue = float(backend.asnumpy(cpl[bi, u]))
-                interf_pwr_bi = tx_bi - cpl_bi_ue
-                # Log-sum of all beam contributions from interfering BS
-                running_interf_lin += float(np.sum(10 ** (0.1 * interf_pwr_bi)))
-            rx_interference_out[u] = float(
-                10 * np.log10(max(running_interf_lin, 1e-50))
-            )
+    # Total received power per BS (from all UEs)
+    total_rx_lin = xp.sum(rx_lin_all, axis=1)                # (N_bs,)
 
-    return rx_power_out, rx_interference_out
+    # Own signal: diagonal block — BS i serves UEs [i*K : (i+1)*K]
+    # Reshape to expose per-BS blocks: (N_bs, K)
+    rx_blocks = rx_lin_all.reshape(N_bs, N_bs, K)
+    own_lin = rx_blocks[xp.arange(N_bs), xp.arange(N_bs), :]  # (N_bs, K)
+
+    # Received power [dBm] of serving BS for its K UEs
+    rx_power_dbm = 10.0 * xp.log10(xp.maximum(own_lin, 1e-50))  # (N_bs, K)
+
+    # Interference = total - own signal, per beam
+    total_expanded = total_rx_lin[:, xp.newaxis]             # (N_bs, 1) → broadcast
+    interf_lin = total_expanded - own_lin                    # (N_bs, K)
+    interf_lin = xp.maximum(interf_lin, 1e-50)
+    rx_interference_dbm = 10.0 * xp.log10(interf_lin)       # (N_bs, K)
+
+    # Return as flat NumPy arrays (one transfer each) — callers index by ue_active
+    return backend.asnumpy(rx_power_dbm), backend.asnumpy(rx_interference_dbm)

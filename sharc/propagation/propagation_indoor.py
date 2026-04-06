@@ -15,6 +15,7 @@ from sharc.propagation.propagation import Propagation
 from sharc.propagation.propagation_free_space import PropagationFreeSpace
 from sharc.propagation.propagation_inh_office import PropagationInhOffice
 from sharc.propagation.propagation_building_entry_loss import PropagationBuildingEntryLoss
+from sharc.support.backend_handler import backend
 
 
 class PropagationIndoor(Propagation):
@@ -105,11 +106,14 @@ class PropagationIndoor(Propagation):
             bs_to_ue_dist_2d = station_b.get_distance_to(station_a)
             bs_to_ue_dist_3d = station_b.get_3d_distance_to(station_a)
 
+        # Convert once — distance arrays may be CuPy when GPU is active
+        bs_to_ue_dist_2d = backend.asnumpy(bs_to_ue_dist_2d)
+        bs_to_ue_dist_3d = backend.asnumpy(bs_to_ue_dist_3d)
         frequency_array = frequency * np.ones(bs_to_ue_dist_2d.shape)
         indoor_stations = np.tile(
-            station_a.indoor, (station_b.num_stations, 1),
+            np.asarray(station_a.indoor), (station_b.num_stations, 1),
         )
-        elevation = np.transpose(station_a.get_elevation(station_b))
+        elevation = np.transpose(backend.asnumpy(station_a.get_elevation(station_b)))
 
         return self.get_loss(
             bs_to_ue_dist_3d,

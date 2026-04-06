@@ -3,6 +3,13 @@
 Created on Wed Aug 16 13:42:19 2017
 
 @author: edgar
+
+GPU Acceleration
+----------------
+Distance arrays from get_3d_distance_to() may be CuPy when SHARC_USE_GPU=1.
+We convert them to NumPy before passing them to sub-models (free_space,
+clutter) that still rely on NumPy internally. This single conversion is far
+cheaper than repeated implicit casts scattered across sub-calls.
 """
 import numpy as np
 from multipledispatch import dispatch
@@ -13,6 +20,7 @@ from sharc.parameters.parameters import Parameters
 from sharc.propagation.propagation_free_space import PropagationFreeSpace
 from sharc.propagation.propagation_clutter_loss import PropagationClutterLoss
 from sharc.support.enumerations import StationType
+from sharc.support.backend_handler import backend
 
 
 class PropagationTerSimple(Propagation):
@@ -65,9 +73,12 @@ class PropagationTerSimple(Propagation):
             between each station
         """
         distance = station_a.get_3d_distance_to(station_b)
+        # Convert once here — distance may be a CuPy array when GPU is active.
+        # A single asnumpy() is cheaper than repeated implicit casts in sub-calls.
+        distance = backend.asnumpy(distance)
         frequency_array = frequency * np.ones(distance.shape)
         indoor_stations = np.tile(
-            station_b.indoor, (station_a.num_stations, 1),
+            np.asarray(station_b.indoor), (station_a.num_stations, 1),
         )
 
         return self.get_loss(distance, frequency_array, indoor_stations, -1.0)

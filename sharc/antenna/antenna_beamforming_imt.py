@@ -126,7 +126,9 @@ class AntennaBeamformingImt(Antenna):
             phi_etilt (float): azimuth electrical tilt angle [degrees]
             theta_etilt (float): elevation electrical tilt angle [degrees]
         """
-        phi, theta = self.to_local_coord(phi_etilt, theta_etilt)
+        # Use CPU-only path: add_beam is called once per UE assignment per snapshot
+        # — launching CUDA kernels for a single scalar is pure overhead.
+        phi, theta = self._to_local_coord_numpy(phi_etilt, theta_etilt)
         self.beams_list.append(
             (phi.item(), (theta - 90).item()),
         )
@@ -338,8 +340,28 @@ class AntennaBeamformingImt(Antenna):
 
         return gain
 
+    def _to_local_coord_numpy(self, phi: float, theta: float) -> tuple:
+        """CPU-only version of to_local_coord() using pure NumPy.
+
+        Used by add_beam() to avoid launching CUDA kernels for single scalars.
+        Identical math to to_local_coord() but always on NumPy.
+        """
+        phi_rad = np.deg2rad(np.asarray(phi, dtype=np.float64)).ravel()
+        theta_rad = np.deg2rad(np.asarray(theta, dtype=np.float64)).ravel()
+
+        points = np.array([
+            np.sin(theta_rad) * np.cos(phi_rad),
+            np.sin(theta_rad) * np.sin(phi_rad),
+            np.cos(theta_rad),
+        ])
+
+        rotated = np.dot(self.rotation_mtx, points)
+        lo_phi = np.rad2deg(np.arctan2(rotated[1], rotated[0])).ravel()
+        lo_theta = np.rad2deg(np.arccos(np.clip(rotated[2], -1.0, 1.0))).ravel()
+        return lo_phi, lo_theta
+
     def to_local_coord(self, phi: float, theta: float) -> tuple:
-        """Returns phi and theta to antennas local coordinate system.
+        """Returns phi and theta in the antenna's local coordinate system.
 
         Parameters
         ----------

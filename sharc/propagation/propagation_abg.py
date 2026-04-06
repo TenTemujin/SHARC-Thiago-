@@ -84,26 +84,28 @@ class PropagationABG(Propagation):
         else:
             distances_3d = station_a.get_3d_distance_to(station_b)
 
-        # Convert CuPy arrays → NumPy so @dispatch can match the np.ndarray
-        # signature. The inner overload will re-wrap as CuPy if GPU is active.
-        _to_np = lambda a: a.get() if hasattr(a, 'get') else np.asarray(a)
-        distances_3d = _to_np(distances_3d)
+        # Phase 2: distances_3d may be a CuPy array — pass it directly.
+        # indoor_stations is always a CPU bool mask (np.ndarray) from StationManager.
+        indoor_stations = np.asarray(station_a.indoor)  # already CPU
 
-        indoor_stations = station_a.indoor
-        if hasattr(indoor_stations, 'get'):
-            indoor_stations = indoor_stations.get()
-        else:
-            indoor_stations = np.asarray(indoor_stations)
+        freq_arr = frequency * np.ones(distances_3d.shape if hasattr(distances_3d, 'shape') else (1,))
 
-        loss = \
-            self.get_loss(
-                distances_3d,
-                frequency * np.ones(distances_3d.shape),
-                indoor_stations,
-                params.imt.shadowing,
+        if backend.use_gpu:
+            # Call GPU implementation directly — bypasses np.ndarray-typed dispatch.
+            from sharc.propagation.propagation_gpu import abg_get_loss_gpu
+            return abg_get_loss_gpu(
+                distances_3d, freq_arr, indoor_stations,
+                self.alpha, self.beta, self.gamma,
+                self.building_loss, self.shadowing_sigma_dB,
+                params.imt.shadowing, self.random_number_gen,
             )
 
-        return loss
+        # CPU fallback
+        _to_np = lambda a: a.get() if hasattr(a, 'get') else np.asarray(a)
+        return self._get_loss_cpu(
+            _to_np(distances_3d), _to_np(freq_arr),
+            indoor_stations, params.imt.shadowing,
+        )
 
     @dispatch(np.ndarray, np.ndarray, np.ndarray, bool)
     def get_loss(
@@ -113,19 +115,19 @@ class PropagationABG(Propagation):
             indoor_stations: np.array,
             shadowing: bool) -> np.array:
         """
-        Calculates ABG path loss — dispatches to GPU when SHARC_USE_GPU=1.
+        Calculates ABG path loss — CPU-only path.
         """
-        if backend.use_gpu:
-            from sharc.propagation.propagation_gpu import abg_get_loss_gpu
-            result = abg_get_loss_gpu(
-                distance, frequency, indoor_stations,
-                self.alpha, self.beta, self.gamma,
-                self.building_loss, self.shadowing_sigma_dB,
-                shadowing, self.random_number_gen,
-            )
-            return backend.asnumpy(result)
+        return self._get_loss_cpu(distance, frequency, indoor_stations, shadowing)
 
-        # CPU path (original)
+    def _get_loss_cpu(
+            self,
+            distance: np.array,
+            frequency: np.array,
+            indoor_stations: np.array,
+            shadowing: bool) -> np.array:
+        """
+        Calculates ABG path loss (CPU implementation).
+        """
         if shadowing:
             shadowing = self.random_number_gen.normal(
                 0, self.shadowing_sigma_dB, distance.shape,

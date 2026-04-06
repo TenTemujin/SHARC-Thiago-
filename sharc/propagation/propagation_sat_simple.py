@@ -3,6 +3,12 @@
 Created on Thu Feb 16 12:04:27 2017
 
 @author: edgar
+
+GPU Acceleration
+----------------
+distance arrays from get_3d_distance_to() may be CuPy when SHARC_USE_GPU=1.
+We convert once to NumPy before calling downstream propagation sub-models
+(free_space, clutter, building_entry) that still expect NumPy arrays.
 """
 import numpy as np
 from multipledispatch import dispatch
@@ -15,6 +21,7 @@ from sharc.propagation.propagation_building_entry_loss import PropagationBuildin
 from sharc.support.enumerations import StationType
 from sharc.station_manager import StationManager
 from sharc.parameters.parameters import Parameters
+from sharc.support.backend_handler import backend
 
 
 class PropagationSatSimple(Propagation):
@@ -67,17 +74,17 @@ class PropagationSatSimple(Propagation):
             between each station
         """
         distance_3d = station_a.get_3d_distance_to(station_b)
+        # Convert once — distance may be CuPy when GPU is active
+        distance_3d = backend.asnumpy(distance_3d)
         frequency = frequency * np.ones(distance_3d.shape)
         indoor_stations = np.tile(
-            station_b.indoor, (station_a.num_stations, 1),
+            np.asarray(station_b.indoor), (station_a.num_stations, 1),
         )
 
         # Elevation angles seen from the station on Earth.
         elevation_angles = {}
         if station_a.is_space_station:
-            elevation_angles["free_space"] = station_b.get_elevation(station_a)
-            # if (station_b_gains.shape != distance.shape):
-            #     raise ValueError(f"Invalid shape for station_b_gains = {station_b_gains.shape}")
+            elevation_angles["free_space"] = backend.asnumpy(station_b.get_elevation(station_a))
             elevation_angles["apparent"] = PropagationP619.apparent_elevation_angle(
                 elevation_angles["free_space"], station_a.height, )
             # Transpose it to fit the expected path loss shape
@@ -86,7 +93,7 @@ class PropagationSatSimple(Propagation):
             elevation_angles["apparent"] = np.transpose(
                 elevation_angles["apparent"])
         elif station_b.is_space_station:
-            elevation_angles["free_space"] = station_a.get_elevation(station_b)
+            elevation_angles["free_space"] = backend.asnumpy(station_a.get_elevation(station_b))
             elevation_angles["apparent"] = PropagationP619.apparent_elevation_angle(
                 elevation_angles["free_space"], station_b.height, )
         else:

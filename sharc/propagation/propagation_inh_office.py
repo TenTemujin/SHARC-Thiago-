@@ -52,20 +52,11 @@ class PropagationInhOffice(Propagation):
         los_probability = self.get_los_probability(d_2D)
         los_condition = self.get_los_condition(los_probability, indoor)
 
-        i_los = np.where(los_condition)[:2]
-        i_nlos = np.where(~ los_condition)[:2]
-
-        loss = np.empty(d_2D.shape)
-
-        if len(i_los[0]):
-            loss[i_los] = self.get_loss_los(
-                d_3D[i_los], f[i_los], shadowing_los,
-            )
-
-        if len(i_nlos[0]):
-            loss[i_nlos] = self.get_loss_nlos(
-                d_3D[i_nlos], f[i_nlos], shadowing_nlos,
-            )
+        # Branchless — compute both arms fully, then merge with np.where
+        # Avoids scatter indexing (i_los / i_nlos) which forces CPU-GPU sync
+        loss_los = self.get_loss_los(d_3D, f, shadowing_los)
+        loss_nlos = self.get_loss_nlos(d_3D, f, shadowing_nlos)
+        loss = np.where(los_condition, loss_los, loss_nlos)
 
         return loss
 

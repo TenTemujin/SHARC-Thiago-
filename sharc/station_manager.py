@@ -32,40 +32,70 @@ class StationManager(object):
 
     def __init__(self, n):
         self.num_stations = n
-        self.x = np.empty(n)  # x coordinate
-        self.y = np.empty(n)  # y coordinate
-        self.z = np.empty(n)  # z coordinate (includes height above ground)
-        self.latitude = np.zeros(n, dtype=float)  # Latitude of station
-        self.longitude = np.zeros(n, dtype=float)  # Longitude of Base Station
-        self.azimuth = np.empty(n)
-        self.elevation = np.empty(n)
-        self.height = np.empty(n)  # station height above ground
-        self.idx_orbit = np.empty(n)
-        self.indoor = np.zeros(n, dtype=bool)
-        self.active = np.ones(n, dtype=bool)
-        self.tx_power = np.empty(n)
-        self.rx_power = np.empty(n)
-        self.rx_interference = np.empty(n)  # Rx interferece in dBW
-        self.ext_interference = np.empty(n)  # External interferece in dBW
-        self.antenna = np.empty(n, dtype=Antenna)
-        self.bandwidth = np.empty(n)  # Bandwidth in MHz
-        self.noise_figure = np.empty(n)
-        self.noise_temperature = np.empty(n)
-        self.thermal_noise = np.empty(n)
-        self.total_interference = np.empty(n)
-        self.pfd_external = np.empty(n)  # External PFD in dBW/m²/MHz
+        # Phase 1: Allocate directly on the active backend (GPU when SHARC_USE_GPU=1)
+        # This eliminates the CPU-init → GPU-transfer overhead on every snapshot.
+        self.x = xp.empty(n)  # x coordinate
+        self.y = xp.empty(n)  # y coordinate
+        self.z = xp.empty(n)  # z coordinate (includes height above ground)
+        self.latitude = xp.zeros(n, dtype=float)  # Latitude of station
+        self.longitude = xp.zeros(n, dtype=float)  # Longitude of Base Station
+        self.azimuth = xp.empty(n)
+        self.elevation = xp.empty(n)
+        self.height = xp.empty(n)  # station height above ground
+        self.idx_orbit = xp.empty(n)
+        self.indoor = np.zeros(n, dtype=bool)    # bool mask — always CPU (used in np.where)
+        self.active = np.ones(n, dtype=bool)     # bool mask — always CPU (used in np.where)
+        self.tx_power = xp.empty(n)
+        self.rx_power = xp.empty(n)
+        self.rx_interference = xp.empty(n)  # Rx interference in dBW
+        self.ext_interference = xp.empty(n)  # External interference in dBW
+        self.antenna = np.empty(n, dtype=Antenna)  # Python object array — CPU only
+        self.bandwidth = xp.empty(n)  # Bandwidth in MHz
+        self.noise_figure = xp.empty(n)
+        self.noise_temperature = xp.empty(n)
+        self.thermal_noise = xp.empty(n)
+        self.total_interference = xp.empty(n)
+        self.pfd_external = xp.empty(n)  # External PFD in dBW/m²/MHz
         # Aggregated External PFD in dBW/m²/MHz
-        self.pfd_external_aggregated = np.empty(n)
-        self.snr = np.empty(n)
-        self.sinr = np.empty(n)
-        self.sinr_ext = np.empty(n)
-        self.inr = np.empty(n)  # INR in dBm/MHz
-        self.pfd = np.empty(n)  # Powerflux density in dBm/m^2
-        self.spectral_mask = np.empty(n, dtype=SpectralMask)
-        self.center_freq = np.empty(n)
+        self.pfd_external_aggregated = xp.empty(n)
+        self.snr = xp.empty(n)
+        self.sinr = xp.empty(n)
+        self.sinr_ext = xp.empty(n)
+        self.inr = xp.empty(n)  # INR in dBm/MHz
+        self.pfd = xp.empty(n)  # Powerflux density in dBm/m^2
+        self.spectral_mask = np.empty(n, dtype=SpectralMask)  # Python object array — CPU only
+        self.center_freq = xp.empty(n)
         self.station_type = StationType.NONE
         self.is_space_station = False
         self.intersite_dist = 0.0
+
+    # Fields that must remain on CPU (bool/object arrays used with np.where/Python logic)
+    _CPU_FIELDS = frozenset({
+        'indoor', 'active', 'antenna', 'spectral_mask',
+        'station_type', 'is_space_station', 'intersite_dist',
+        'num_stations',
+    })
+
+    def __setattr__(self, name: str, value):
+        """Auto-promote numeric numpy arrays to the active backend.
+
+        When SHARC_USE_GPU=1, any np.ndarray assigned to a non-CPU
+        field is transparently moved to GPU (CuPy). This removes the
+        need to update station_factory.py and other callers — they
+        keep using np.ones/np.zeros, but the data ends up in VRAM.
+
+        CPU-bound fields (bool masks, Python object arrays) are
+        excluded because they are required by np.where / Python loops.
+        """
+        if (
+            backend.use_gpu
+            and name not in StationManager._CPU_FIELDS
+            and isinstance(value, np.ndarray)
+            and value.dtype.kind in ('f', 'i', 'u', 'c')  # float/int/uint/complex only
+        ):
+            value = backend.asarray(value)
+        object.__setattr__(self, name, value)
+
 
     def get_station_list(self, id=None) -> list:
         """Return a list of Station objects for the given indices.
@@ -443,34 +473,44 @@ def copy_active_stations(stations: StationManager) -> StationManager:
     StationManager
         A new StationManager object with only the active stations.
     """
-    act_sta = StationManager(np.sum(stations.active))
-    for idx, active_idx in enumerate(np.where(stations.active)[0]):
-        act_sta.x[idx] = stations.x[active_idx]
-        act_sta.y[idx] = stations.y[active_idx]
-        act_sta.z[idx] = stations.z[active_idx]
-        act_sta.azimuth[idx] = stations.azimuth[active_idx]
-        act_sta.elevation[idx] = stations.elevation[active_idx]
-        act_sta.height[idx] = stations.height[active_idx]
-        act_sta.indoor[idx] = stations.indoor[active_idx]
-        act_sta.active[idx] = stations.active[active_idx]
-        act_sta.tx_power[idx] = stations.tx_power[active_idx]
-        act_sta.rx_power[idx] = stations.rx_power[active_idx]
-        act_sta.rx_interference[idx] = stations.rx_interference[active_idx]
-        act_sta.ext_interference[idx] = stations.ext_interference[active_idx]
-        act_sta.antenna[idx] = stations.antenna[active_idx]
-        act_sta.bandwidth[idx] = stations.bandwidth[active_idx]
-        act_sta.noise_figure[idx] = stations.noise_figure[active_idx]
-        act_sta.noise_temperature[idx] = stations.noise_temperature[active_idx]
-        act_sta.thermal_noise[idx] = stations.thermal_noise[active_idx]
-        act_sta.total_interference[idx] = stations.total_interference[active_idx]
-        act_sta.snr[idx] = stations.snr[active_idx]
-        act_sta.sinr[idx] = stations.sinr[active_idx]
-        act_sta.sinr_ext[idx] = stations.sinr_ext[active_idx]
-        act_sta.inr[idx] = stations.inr[active_idx]
-        act_sta.pfd[idx] = stations.pfd[active_idx]
-        act_sta.spectral_mask = stations.spectral_mask
-        act_sta.center_freq[idx] = stations.center_freq[active_idx]
-        act_sta.station_type = stations.station_type
-        act_sta.is_space_station = stations.is_space_station
-        act_sta.intersite_dist = stations.intersite_dist
+    active_idx = np.where(stations.active)[0]  # CPU bool mask → CPU index array
+    n_active = len(active_idx)
+    # StationManager.__init__ now allocates on xp (GPU when active)
+    act_sta = StationManager(n_active)
+
+    # For GPU arrays, index with an xp array to stay on-device
+    gpu_idx = backend.asarray(active_idx)
+
+    # Numeric arrays — index on-device (GPU idx keeps result on GPU)
+    act_sta.x = stations.x[gpu_idx].copy()
+    act_sta.y = stations.y[gpu_idx].copy()
+    act_sta.z = stations.z[gpu_idx].copy()
+    act_sta.azimuth = stations.azimuth[gpu_idx].copy()
+    act_sta.elevation = stations.elevation[gpu_idx].copy()
+    act_sta.height = stations.height[gpu_idx].copy()
+    act_sta.tx_power = stations.tx_power[gpu_idx].copy()
+    act_sta.rx_power = stations.rx_power[gpu_idx].copy()
+    act_sta.rx_interference = stations.rx_interference[gpu_idx].copy()
+    act_sta.ext_interference = stations.ext_interference[gpu_idx].copy()
+    act_sta.bandwidth = stations.bandwidth[gpu_idx].copy()
+    act_sta.noise_figure = stations.noise_figure[gpu_idx].copy()
+    act_sta.noise_temperature = stations.noise_temperature[gpu_idx].copy()
+    act_sta.thermal_noise = stations.thermal_noise[gpu_idx].copy()
+    act_sta.total_interference = stations.total_interference[gpu_idx].copy()
+    act_sta.snr = stations.snr[gpu_idx].copy()
+    act_sta.sinr = stations.sinr[gpu_idx].copy()
+    act_sta.sinr_ext = stations.sinr_ext[gpu_idx].copy()
+    act_sta.inr = stations.inr[gpu_idx].copy()
+    act_sta.pfd = stations.pfd[gpu_idx].copy()
+    act_sta.center_freq = stations.center_freq[gpu_idx].copy()
+    # CPU object/bool arrays — use CPU index
+    act_sta.indoor = stations.indoor[active_idx].copy()
+    act_sta.active = stations.active[active_idx].copy()
+    act_sta.antenna = stations.antenna[active_idx].copy()
+    # Scalar/object fields shared by reference
+    act_sta.spectral_mask = stations.spectral_mask
+    act_sta.station_type = stations.station_type
+    act_sta.is_space_station = stations.is_space_station
+    act_sta.intersite_dist = stations.intersite_dist
     return act_sta
+
