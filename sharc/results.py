@@ -3,6 +3,14 @@
 Created on Thu Mar 23 08:47:46 2017
 
 @author: edgar
+
+GPU Acceleration — Deferred Result Collection
+----------------------------------------------
+This module includes a GPU-staging mechanism that eliminates
+per-snapshot synchronous GPU→CPU transfers (.tolist() calls).
+Results remain as GPU arrays in a staging dict until a write
+boundary (every N snapshots), when a single batched transfer
+is performed per field.
 """
 
 import glob
@@ -10,6 +18,7 @@ import os
 import datetime
 import re
 import pathlib
+import numpy as np
 import pandas as pd
 from shutil import copy
 from sharc.support.sharc_logger import SimulationLogger
@@ -28,6 +37,10 @@ class Results(object):
     overwrite_sample_files = True
 
     def __init__(self):
+        # ── GPU Staging Buffer ─────────────────────────────────────────────
+        # field_name → list of GPU (CuPy) arrays, flushed in batches.
+        self._gpu_staging: dict[str, list] = {}
+
         # Transmit power density [dBm/Hz]
         self.imt_ul_tx_power_density = SampleList()
         self.imt_ul_tx_power = SampleList()
@@ -193,14 +206,75 @@ class Results(object):
 
         return results_relevant_attr_names
 
+    # ── GPU Staging API ────────────────────────────────────────────────────
+
+    def stage_gpu(self, field: str, gpu_array):
+        """Stage a GPU array for deferred transfer — NO synchronization.
+
+        If the array is already a NumPy ndarray (CPU mode), it is
+        appended directly to the result list. Otherwise it is kept
+        as a CuPy array in the staging buffer until :meth:`flush_gpu_staged`
+        is called (typically every 10 snapshots at write boundaries).
+
+        Parameters
+        ----------
+        field : str
+            Name of the SampleList attribute on this Results object.
+        gpu_array : array-like
+            1-D or 2-D GPU/CPU array of results.
+        """
+        if isinstance(gpu_array, np.ndarray):
+            # Already on CPU — bypass staging
+            getattr(self, field).extend(gpu_array.ravel().tolist())
+        else:
+            self._gpu_staging.setdefault(field, []).append(gpu_array.ravel())
+
+    def flush_gpu_staged(self):
+        """Transfer ALL staged GPU arrays to CPU in one batch.
+
+        For each field, the staged 1-D CuPy arrays are concatenated
+        on-device and then transferred with a single ``asnumpy()``
+        call, resulting in **one** GPU synchronization per field
+        instead of one per snapshot.
+        """
+        if not self._gpu_staging:
+            return
+
+        from sharc.support.backend_handler import backend
+
+        for field, arrays in self._gpu_staging.items():
+            if not arrays:
+                continue
+            # Import here to avoid circular imports / CPU-only envs
+            try:
+                from sharc.support.backend_handler import xp as _xp
+                concatenated = _xp.concatenate(arrays)
+                cpu_flat = backend.asnumpy(concatenated)
+            except Exception:
+                # Fallback: convert individually (shouldn't happen)
+                cpu_flat = np.concatenate(
+                    [backend.asnumpy(a) for a in arrays],
+                )
+            getattr(self, field).extend(cpu_flat.tolist())
+
+        self._gpu_staging.clear()
+
+    # ── File I/O ──────────────────────────────────────────────────────────
+
     def write_files(self, snapshot_number: int):
-        """Writes the sample data to the output file
+        """Writes the sample data to the output file.
+
+        Automatically flushes any pending GPU-staged results before
+        writing to ensure no data is lost.
 
         Parameters
         ----------
         snapshot_number : int
             Current snapshot number
         """
+        # Safety net: flush any un-flushed GPU staging
+        self.flush_gpu_staged()
+
         results_relevant_attr_names = self.get_relevant_attributes()
         for attr_name in results_relevant_attr_names:
             file_path = os.path.join(

@@ -3,6 +3,16 @@
 Created on Wed Jan  4 19:46:20 2017
 
 @author: edgar
+
+Hybrid Acceleration
+-------------------
+ThreadSimulation now delegates snapshot execution to
+``Model.run_all_snapshots()``, which auto-selects between:
+  - Pipelined mode (3-stage async, GPU + CPU overlap)
+  - Sequential mode (original behavior)
+
+The ``stop_flag`` is passed through for clean cancellation
+from the GUI.
 """
 
 from sharc.model import Model
@@ -48,13 +58,25 @@ class ThreadSimulation(Thread):
     def run(self):
         """
         This is overriden from base class and represents the thread's activity.
+
+        Uses ``Model.run_all_snapshots()`` for both sequential and pipelined
+        execution modes. Falls back to the original manual loop if
+        ``run_all_snapshots`` is unavailable.
         """
         start = time.perf_counter()
 
         self.model.initialize()
-        while not self.model.is_finished() and not self.is_stopped():
-            self.model.snapshot()
+
+        # Use the new unified runner (auto-selects pipeline vs sequential)
+        if hasattr(self.model, 'run_all_snapshots'):
+            self.model.run_all_snapshots(stop_flag=self.stop_flag)
+        else:
+            # Fallback: original sequential loop
+            while not self.model.is_finished() and not self.is_stopped():
+                self.model.snapshot()
+
         self.model.finalize()
+
         # calculates simulation time when it finishes and sets the elapsed time
         end = time.perf_counter()
         elapsed_time = time.gmtime(end - start)

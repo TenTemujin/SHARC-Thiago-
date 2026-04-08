@@ -3,6 +3,21 @@
 Created on Mon Dec 26 17:03:51 2016
 
 @author: edgar
+
+Hybrid Acceleration
+-------------------
+This module supports two execution modes:
+
+1. **Sequential (default):** The original snapshot loop used by
+   ``ThreadSimulation`` and the GUI. Compatible with all environments.
+
+2. **Pipelined (opt-in):** Uses ``PipelineManager`` to overlap CPU
+   prep with GPU compute across snapshots. Activated when:
+     - ``SHARC_USE_GPU=1`` (GPU backend active), AND
+     - ``SHARC_PIPELINE=1`` (explicit opt-in)
+
+   The pipelined mode produces identical results — only the execution
+   order changes (N+1 prep overlaps with N compute).
 """
 
 from sharc.support.observable import Observable
@@ -12,7 +27,11 @@ from sharc.simulation_downlink import SimulationDownlink
 from sharc.simulation_uplink import SimulationUplink
 from sharc.parameters.parameters import Parameters
 
+import os
 import random
+import logging
+
+logger = logging.getLogger("sharc.model")
 
 
 class Model(Observable):
@@ -119,6 +138,8 @@ class Model(Observable):
 
         return description
 
+    # ── Sequential snapshot (original behavior) ───────────────────────────
+
     def snapshot(self):
         """
         Perform one simulation step and collect the results.
@@ -180,3 +201,89 @@ class Model(Observable):
             message="Elapsed time: " + elapsed_time,
             state=State.FINISHED,
         )
+
+    # ── Hybrid Pipelined Execution ────────────────────────────────────────
+
+    @property
+    def pipeline_enabled(self) -> bool:
+        """Check if pipeline mode is explicitly enabled.
+
+        Pipeline mode requires:
+          - SHARC_USE_GPU=1  (GPU active)
+          - SHARC_PIPELINE=1 (explicit opt-in)
+
+        Returns
+        -------
+        bool
+        """
+        from sharc.support.backend_handler import backend
+        gpu_active = backend.use_gpu
+        pipeline_opt_in = os.environ.get("SHARC_PIPELINE", "0") == "1"
+        return gpu_active and pipeline_opt_in
+
+    def run_all_snapshots(self, stop_flag=None):
+        """Run all snapshots using the best available execution strategy.
+
+        - If ``pipeline_enabled``, uses the 3-stage ``PipelineManager``
+          for overlapped CPU/GPU execution.
+        - Otherwise, falls back to the original sequential loop.
+
+        This method is used by ``ThreadSimulation.run()`` as the
+        preferred entry point. The ``snapshot()`` method remains
+        available for backward compatibility.
+
+        Parameters
+        ----------
+        stop_flag : threading.Event, optional
+            External cancellation signal.
+
+        Returns
+        -------
+        dict
+            Timing statistics (empty dict for sequential mode).
+        """
+        def _notify(snapshot_num, message):
+            self.current_snapshot = snapshot_num
+            self.notify_observers(source=__name__, message=message)
+
+        if self.pipeline_enabled:
+            from sharc.support.pipeline_manager import PipelineManager
+
+            logger.info("[SHARC] Running in PIPELINED mode (3-stage async)")
+            self.notify_observers(
+                source=__name__,
+                message="[Pipeline] GPU pipelined execution active",
+            )
+
+            mgr = PipelineManager(
+                simulation=self.simulation,
+                seeds=self.secondary_seeds,
+                write_interval=10,
+                notify_callback=_notify,
+                stop_flag=stop_flag,
+            )
+            timing = mgr.run()
+
+            # Update current_snapshot for finalize()
+            self.current_snapshot = self.parameters.general.num_snapshots
+
+            # Log timing summary
+            summary = mgr.get_timing_summary()
+            logger.info(summary)
+            print(summary)
+
+            return timing
+        else:
+            from sharc.support.pipeline_manager import SequentialRunner
+
+            logger.info("[SHARC] Running in SEQUENTIAL mode")
+
+            runner = SequentialRunner(
+                simulation=self.simulation,
+                seeds=self.secondary_seeds,
+                write_interval=10,
+                notify_callback=_notify,
+                stop_flag=stop_flag,
+            )
+            return runner.run()
+

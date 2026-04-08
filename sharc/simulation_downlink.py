@@ -556,38 +556,39 @@ class SimulationDownlink(Simulation):
         """
         Collect and store results for the current downlink simulation snapshot.
 
+        Uses ``stage_gpu()`` for GPU-resident arrays so that the GPU
+        pipeline is NOT flushed on every snapshot. The staged data is
+        transferred in batch when ``write_files`` is called.
+
         Args:
             write_to_file (bool): Whether to write results to file.
             snapshot_number (int): The current snapshot number.
         """
+        # Helper: stage GPU arrays without sync; direct extend for CPU scalars
+        _sg = self.results.stage_gpu
+
         if not self.parameters.imt.interfered_with and np.any(self.bs.active):
-            self.results.system_inr.extend(self.system.inr.flatten())
-            self.results.system_dl_interf_power.extend(
-                self.system.rx_interference.flatten(),
-            )
-            self.results.system_dl_interf_power_per_mhz.extend(
-                self.system.rx_interference.flatten() - 10 * math.log10(self.system.bandwidth),
-            )
-            # TODO: generalize this a bit more if needed (same conditional as
-            # above)
+            _sg('system_inr', self.system.inr.flatten())
+            _sg('system_dl_interf_power', self.system.rx_interference.flatten())
+            _sg('system_dl_interf_power_per_mhz',
+                self.system.rx_interference.flatten() - 10 * math.log10(self.system.bandwidth))
             if hasattr(
                     self.system.antenna[0],
                     "effective_area") and self.system.num_stations == 1:
-                self.results.system_pfd.extend([self.system.pfd])
+                _sg('system_pfd', xp.atleast_1d(self.system.pfd))
 
         bs_active = np.where(self.bs.active)[0]
         sys_active = np.where(self.system.active)[0]
         ue_active = np.where(self.ue.active)[0]
-        
+
         if len(bs_active) > 0 and len(ue_active) > 0:
             bs_indices = np.repeat(bs_active, len(ue_active) // len(bs_active))
-            
-            if not self.parameters.imt.imt_dl_intra_sinr_calculation_disabled:
-                self.results.imt_path_loss.extend(self.path_loss_imt[bs_indices, ue_active].tolist())
-                self.results.imt_coupling_loss.extend(self.coupling_loss_imt[bs_indices, ue_active].tolist())
 
-                self.results.imt_bs_antenna_gain.extend(self.imt_bs_antenna_gain[bs_indices, ue_active].tolist())
-                self.results.imt_ue_antenna_gain.extend(self.imt_ue_antenna_gain[bs_indices, ue_active].tolist())
+            if not self.parameters.imt.imt_dl_intra_sinr_calculation_disabled:
+                _sg('imt_path_loss', self.path_loss_imt[bs_indices, ue_active])
+                _sg('imt_coupling_loss', self.coupling_loss_imt[bs_indices, ue_active])
+                _sg('imt_bs_antenna_gain', self.imt_bs_antenna_gain[bs_indices, ue_active])
+                _sg('imt_ue_antenna_gain', self.imt_ue_antenna_gain[bs_indices, ue_active])
 
                 tput = self.calculate_imt_tput(
                     self.ue.sinr[ue_active],
@@ -595,7 +596,7 @@ class SimulationDownlink(Simulation):
                     self.parameters.imt.downlink.sinr_max,
                     self.parameters.imt.downlink.attenuation_factor,
                 )
-                self.results.imt_dl_tput.extend(tput.tolist())
+                _sg('imt_dl_tput', tput)
 
             # Results for IMT-SYSTEM
             if self.parameters.imt.interfered_with:  # IMT suffers interference
@@ -605,68 +606,58 @@ class SimulationDownlink(Simulation):
                     self.parameters.imt.downlink.sinr_max,
                     self.parameters.imt.downlink.attenuation_factor,
                 )
-                self.results.imt_dl_tput_ext.extend(tput_ext.tolist())
-                self.results.imt_dl_sinr_ext.extend(self.ue.sinr_ext[ue_active].tolist())
-                self.results.imt_dl_inr.extend(self.ue.inr[ue_active].tolist())
+                _sg('imt_dl_tput_ext', tput_ext)
+                _sg('imt_dl_sinr_ext', self.ue.sinr_ext[ue_active])
+                _sg('imt_dl_inr', self.ue.inr[ue_active])
 
-                self.results.imt_dl_pfd_external.extend(
-                    self.ue.pfd_external[sys_active[:, np.newaxis], ue_active].flatten().tolist())
+                _sg('imt_dl_pfd_external',
+                    self.ue.pfd_external[sys_active[:, np.newaxis], ue_active].flatten())
 
-                self.results.imt_dl_pfd_external_aggregated.extend(
-                    self.ue.pfd_external_aggregated[ue_active].tolist())
+                _sg('imt_dl_pfd_external_aggregated',
+                    self.ue.pfd_external_aggregated[ue_active])
 
-                self.results.system_imt_antenna_gain.extend(
-                    self.system_imt_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten().tolist())
-                
+                _sg('system_imt_antenna_gain',
+                    self.system_imt_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten())
+
                 if len(self.imt_system_antenna_gain):
-                    self.results.imt_system_antenna_gain.extend(
-                        self.imt_system_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                    )
+                    _sg('imt_system_antenna_gain',
+                        self.imt_system_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten())
                 if len(self.imt_system_antenna_gain_adjacent):
-                    self.results.imt_system_antenna_gain_adjacent.extend(
-                        self.imt_system_antenna_gain_adjacent[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                    )
-                self.results.imt_system_path_loss.extend(
-                    self.imt_system_path_loss[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                )
+                    _sg('imt_system_antenna_gain_adjacent',
+                        self.imt_system_antenna_gain_adjacent[sys_active[:, np.newaxis], ue_active].flatten())
+                _sg('imt_system_path_loss',
+                    self.imt_system_path_loss[sys_active[:, np.newaxis], ue_active].flatten())
                 if self.param_system.channel_model == "HDFSS":
-                    self.results.imt_system_build_entry_loss.extend(
-                        self.imt_system_build_entry_loss[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                    )
-                    self.results.imt_system_diffraction_loss.extend(
-                        self.imt_system_diffraction_loss[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                    )
-                self.results.sys_to_imt_coupling_loss.extend(
-                    self.coupling_loss_imt_system[ue_active[:, np.newaxis], sys_active].flatten().tolist())
+                    _sg('imt_system_build_entry_loss',
+                        self.imt_system_build_entry_loss[sys_active[:, np.newaxis], ue_active].flatten())
+                    _sg('imt_system_diffraction_loss',
+                        self.imt_system_diffraction_loss[sys_active[:, np.newaxis], ue_active].flatten())
+                _sg('sys_to_imt_coupling_loss',
+                    self.coupling_loss_imt_system[ue_active[:, np.newaxis], sys_active].flatten())
             else:  # IMT is the interferer
-                self.results.system_imt_antenna_gain.extend(
-                    self.system_imt_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                )
+                _sg('system_imt_antenna_gain',
+                    self.system_imt_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten())
                 if len(self.imt_system_antenna_gain):
-                    self.results.imt_system_antenna_gain.extend(
-                        self.imt_system_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                    )
+                    _sg('imt_system_antenna_gain',
+                        self.imt_system_antenna_gain[sys_active[:, np.newaxis], ue_active].flatten())
                 if len(self.imt_system_antenna_gain_adjacent):
-                    self.results.imt_system_antenna_gain_adjacent.extend(
-                        self.imt_system_antenna_gain_adjacent[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                    )
-                self.results.imt_system_path_loss.extend(
-                    self.imt_system_path_loss[sys_active[:, np.newaxis], ue_active].flatten().tolist()
-                )
+                    _sg('imt_system_antenna_gain_adjacent',
+                        self.imt_system_antenna_gain_adjacent[sys_active[:, np.newaxis], ue_active].flatten())
+                _sg('imt_system_path_loss',
+                    self.imt_system_path_loss[sys_active[:, np.newaxis], ue_active].flatten())
                 if self.param_system.channel_model == "HDFSS":
-                    self.results.imt_system_build_entry_loss.extend(
-                        self.imt_system_build_entry_loss[:, bs_active].flatten().tolist()
-                    )
-                    self.results.imt_system_diffraction_loss.extend(
-                        self.imt_system_diffraction_loss[:, bs_active].flatten().tolist()
-                    )
+                    _sg('imt_system_build_entry_loss',
+                        self.imt_system_build_entry_loss[:, bs_active].flatten())
+                    _sg('imt_system_diffraction_loss',
+                        self.imt_system_diffraction_loss[:, bs_active].flatten())
 
-            tx_pwr_flat = np.concatenate([self.bs.tx_power[bs] for bs in bs_active])
-            self.results.imt_dl_tx_power.extend(tx_pwr_flat.tolist())
+            tx_pwr_flat = backend.asarray(
+                xp.concatenate([xp.atleast_1d(self.bs.tx_power[bs]) for bs in bs_active]))
+            _sg('imt_dl_tx_power', tx_pwr_flat)
 
             if not self.parameters.imt.imt_dl_intra_sinr_calculation_disabled:
-                self.results.imt_dl_sinr.extend(self.ue.sinr[ue_active].tolist())
-                self.results.imt_dl_snr.extend(self.ue.snr[ue_active].tolist())
+                _sg('imt_dl_sinr', self.ue.sinr[ue_active])
+                _sg('imt_dl_snr', self.ue.snr[ue_active])
 
         if write_to_file:
             self.results.write_files(snapshot_number)
